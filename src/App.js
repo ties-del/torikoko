@@ -3,7 +3,6 @@ import { supabase } from "./supabase";
 
 const HOURLY_NORMAL = 1116;
 const HOURLY_WEEKEND = 1200; // ← 重要：未定義バグ修正
-const BUSINESS_START = 11 * 60;
 const BUSINESS_END = 18 * 60 + 30;
 const BREAK_MINUTES = 45;
 
