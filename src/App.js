@@ -2868,7 +2868,6 @@ export default function App() {
     const loc = hinted && workRulesByLocation[hinted] ? hinted : getLocationForName(name);
     const base = sanitizeRule(workRulesByLocation[loc] || { ...DEFAULT_WORK_RULE, locationName: loc });
     let rule = base;
-    const overrideEnabled = !!employeeOverrides[name]?.enabled;
 
     // 始め設定・終了設定の丸めは設定モードに関わらず個別指定できる。
     const contractStart = contractStartByName[name];
