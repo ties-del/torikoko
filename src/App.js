@@ -2201,6 +2201,7 @@ function IndividualSettingsModal({ name, year, month, fareSettings, fareConfig, 
   const [newLabel, setNewLabel] = useState("");
   const [newAmount, setNewAmount] = useState(""); // 文字列で管理し追加時に数値変換
   const [newPeriodKey, setNewPeriodKey] = useState(`${year}-${pad2(month)}`);
+  const [addError, setAddError] = useState("");
 
   const config     = fareConfig[name] || { type: "daily" };
   const nameExtras = extras[name] || [];
@@ -2221,9 +2222,10 @@ function IndividualSettingsModal({ name, year, month, fareSettings, fareConfig, 
   };
 
   const addExtra = () => {
-    const label = newLabel.trim();
+    const label = newLabel.trim() || "臨時支給";
     const amount = parseInt(String(newAmount).replace(/[^0-9]/g, ""), 10) || 0;
-    if (!label) return;
+    if (amount <= 0) { setAddError("金額を入力してください"); return; }
+    setAddError("");
     const entry = { id: Date.now().toString(), label, amount, periodKey: newPeriodKey };
     onUpdateExtras(name, [...nameExtras, entry]);
     setNewLabel(""); setNewAmount("");
@@ -2357,6 +2359,7 @@ function IndividualSettingsModal({ name, year, month, fareSettings, fareConfig, 
             {/* 追加フォーム */}
             <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
               <div style={{ fontSize: 12, fontWeight: 800, color: "#166534", marginBottom: 8 }}>＋ 追加</div>
+              {addError && <div style={{ color: "#dc2626", fontSize: 11, marginBottom: 6 }}>⚠ {addError}</div>}
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <input placeholder="名称（例：健康診断）" value={newLabel}
                   onChange={e => setNewLabel(e.target.value)}
