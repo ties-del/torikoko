@@ -4071,32 +4071,27 @@ export default function App() {
       Object.entries(byName).forEach(([n, rows]) => rows.forEach((r) => allKeys.add(n + "|" + r.dateStr)));
       // 店舗を自動振り分け：CSV列 > 既存設定 > 現在の店舗 の優先順
       const nameLocations = {};
+      const rowLocations = {}; // 日付ごとの例外店舗 { "名前|dateStr": "店舗" }
       Object.keys(byName).forEach((n) => {
         const fromCSV = matchStoreFromCSVLocation(locationByName[n], locationNames);
         const fromSaved = normalizeLocation(employeeLocation[n]);
-
-        // 基本の判定
         let detectedLoc = fromCSV || (fromSaved && locationNames.includes(fromSaved) ? fromSaved : null) || activeLocation;
 
-        // 個別ルール
-        if (byName[n] && byName[n].length > 0) {
-          const firstDateStr = byName[n][0].dateStr;
-          const dateObj = new Date(firstDateStr);
-          const dayOfWeek = dateObj.getDay();
-          const isHoliday = !!HOLIDAYS[firstDateStr];
-
-          console.log("[店舗振り分け]", JSON.stringify(n), "firstDate:", firstDateStr, "dayOfWeek:", dayOfWeek);
-
-          if (n === "吉田健志") {
-            detectedLoc = (dayOfWeek === 3) ? "Lien" : "Ties";
-          }
-          else if (n === "古山美菜子") {
-            detectedLoc = (isHoliday || dayOfWeek === 6) ? "Ties" : "Lien";
-          }
+        if (n === "吉田健志") {
+          detectedLoc = "Ties";
+          byName[n].forEach((row) => {
+            if (new Date(row.dateStr).getDay() === 3) rowLocations[n + "|" + row.dateStr] = "Lien";
+          });
+        } else if (n === "古山美菜子") {
+          detectedLoc = "Lien";
+          byName[n].forEach((row) => {
+            const d = new Date(row.dateStr);
+            if (d.getDay() === 6 || !!HOLIDAYS[row.dateStr]) rowLocations[n + "|" + row.dateStr] = "Ties";
+          });
         }
         nameLocations[n] = detectedLoc;
       });
-      setPreview({ byName, selKeys: allKeys, nameLocations, csvLocations: locationByName, parseMeta: best });
+      setPreview({ byName, selKeys: allKeys, nameLocations, rowLocations, csvLocations: locationByName, parseMeta: best });
       const delimLabel = best?.delimiter === "\t" ? "TAB" : (best?.delimiter || ",");
       showToast(`れこるCSVを解析: ${best.importedCount}件/${best.nameCount}名 (${best.encoding}, 区切り:${delimLabel})`);
     };
@@ -4297,7 +4292,8 @@ export default function App() {
           if (!preview.selKeys.has(k)) continue;
           const existing = normalizeAttendanceEntry(next[name][row.dateStr] || {});
           if (existing.modified) continue;
-          const rule = getEffectiveRuleAtLocation(name, assignedLoc);
+          const rowLoc = preview.rowLocations?.[k] || assignedLoc;
+          const rule = getEffectiveRuleAtLocation(name, rowLoc);
           const hasActualTime = !!(row.rawStart || row.rawEnd);
           const shouldClearAutoAttendance =
             !hasActualTime &&
@@ -4313,14 +4309,14 @@ export default function App() {
               kind: "attendance",
               name,
               dateStr: row.dateStr,
-              location: assignedLoc,
+              location: rowLoc,
               promise: dbDeleteAttendance(user.id, name, row.dateStr),
             });
             continue;
           }
 
           const nextStatus = existing.status || (hasActualTime ? "出勤" : "");
-          const nextShiftType = normalizeShiftType(existing.shiftType) || guessTorikokoShiftType(assignedLoc, row);
+          const nextShiftType = normalizeShiftType(existing.shiftType) || guessTorikokoShiftType(rowLoc, row);
           const effectiveRule = applyEntryShiftRule(rule, { ...row, shiftType: nextShiftType });
           const merged = {
             ...existing,
@@ -4338,7 +4334,7 @@ export default function App() {
             kind: "attendance",
             name,
             dateStr: row.dateStr,
-            location: assignedLoc,
+            location: rowLoc,
             payload: merged,
             promise: dbUpsertAttendance(user.id, name, row.dateStr, merged),
           });
