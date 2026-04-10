@@ -8,6 +8,7 @@
 //    name text not null,
 //    date_str text not null,
 //    status text,
+//    shift_type text default '',
 //    start_time text,
 //    end_time text,
 //    raw_start text,
@@ -80,12 +81,19 @@ const DEFAULT_WORK_RULE = {
 
 // 初期3店舗
 const DEFAULT_LOCATIONS = ["とりここ", "Ties", "Lien"];
+const DEFAULT_BENTO_PRICE_PER_MEAL = 500;
+const LEGACY_SHARED_BENTO_PRICE_KEY = "__shared__";
+const BENTO_PRICE_APP_KEY_PREFIX = "bento_price:";
 
 const EMPLOYMENT_TYPES = ["正社員", "パート"];
 const DEFAULT_EMPLOYMENT_TYPE = "パート";
 const RULE_MODE_STORE = "store_shared";
 const RULE_MODE_INDIVIDUAL = "store_individual";
 const KINMU_OPTIONS = ["出勤", "欠勤", "遅刻", "早退", "休日出勤", "有給休暇", "半有給"];
+const TORIKOKO_SHIFT_RULES = {
+  morning: { label: "午前", start: "11:00", end: "15:00" },
+  afternoon: { label: "午後", start: "15:00", end: "18:30" },
+};
 
 const HOLIDAYS = {
   "2026-01-01": "元日", "2026-01-12": "成人の日",
@@ -323,6 +331,100 @@ function getBentoStorageKey(userId) {
   return `torikoko:bento:${userId || "anon"}`;
 }
 
+function getBentoPriceStorageKey(userId) {
+  return `torikoko:bentoPrice:${userId || "anon"}`;
+}
+
+function normalizeBentoPriceMap(source = {}) {
+  const next = {};
+  for (const [rawKey, rawValue] of Object.entries(source || {})) {
+    const price = Math.max(0, Math.round(Number(rawValue) || 0));
+    if (rawKey === LEGACY_SHARED_BENTO_PRICE_KEY) {
+      next[rawKey] = price;
+      continue;
+    }
+    const locationName = normalizeLocation(rawKey);
+    if (!locationName) continue;
+    next[locationName] = price;
+  }
+  return next;
+}
+
+function loadBentoPriceMapFromStorage(userId) {
+  try {
+    const raw = localStorage.getItem(getBentoPriceStorageKey(userId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return normalizeBentoPriceMap(parsed);
+    }
+  } catch {
+    // fall back to the legacy scalar format below
+  }
+  try {
+    const raw = localStorage.getItem(getBentoPriceStorageKey(userId));
+    const price = Math.max(0, Math.round(Number(raw) || 0));
+    if (price > 0) return { [LEGACY_SHARED_BENTO_PRICE_KEY]: price };
+  } catch {
+    // ignore storage issues
+  }
+  return {};
+}
+
+function saveBentoPriceMapToStorage(userId, bentoPriceMap) {
+  try {
+    localStorage.setItem(getBentoPriceStorageKey(userId), JSON.stringify(normalizeBentoPriceMap(bentoPriceMap)));
+  } catch {
+    // ignore storage issues
+  }
+}
+
+function getBentoAppKey(locationName) {
+  return `${BENTO_PRICE_APP_KEY_PREFIX}${normalizeLocation(locationName) || DEFAULT_WORK_RULE.locationName}`;
+}
+
+function resolveBentoFallbackPrice(fallbackPrice, name, dateStr) {
+  const value = typeof fallbackPrice === "function" ? fallbackPrice(name, dateStr) : fallbackPrice;
+  return Math.max(0, Math.round(Number(value) || 0));
+}
+
+function isBentoCheckedValue(value) {
+  if (value === true) return true;
+  if (typeof value === "number") return value > 0;
+  if (value && typeof value === "object") {
+    if (value.checked === true) return true;
+    if (Number(value.price) > 0) return true;
+    if (Number(value.unitPrice) > 0) return true;
+  }
+  return false;
+}
+
+function getBentoUnitPrice(value, fallbackPrice = 0) {
+  if (!isBentoCheckedValue(value)) return 0;
+  if (typeof value === "number") return Math.max(0, Math.round(value));
+  if (value && typeof value === "object") {
+    const direct = Math.max(0, Math.round(Number(value.price) || Number(value.unitPrice) || 0));
+    if (direct > 0) return direct;
+  }
+  return Math.max(0, Math.round(Number(fallbackPrice) || 0));
+}
+
+function countBentoEntries(byDate, dateFilter = null) {
+  return Object.entries(byDate || {}).filter(([dateStr, value]) => {
+    if (!isBentoCheckedValue(value)) return false;
+    if (typeof dateFilter === "function" && !dateFilter(dateStr)) return false;
+    return true;
+  }).length;
+}
+
+function sumBentoEntries(byDate, fallbackPrice = 0, dateFilter = null) {
+  return Object.entries(byDate || {}).reduce((sum, [dateStr, value]) => {
+    if (!isBentoCheckedValue(value)) return sum;
+    if (typeof dateFilter === "function" && !dateFilter(dateStr)) return sum;
+    return sum + getBentoUnitPrice(value, fallbackPrice);
+  }, 0);
+}
+
 function loadBentoChecksFromStorage(userId) {
   try {
     const raw = localStorage.getItem(getBentoStorageKey(userId));
@@ -341,6 +443,13 @@ function saveBentoChecksToStorage(userId, bentoChecks) {
   }
 }
 
+function filterRecordByKeys(record, allowedKeys) {
+  const allowed = new Set((allowedKeys || []).filter(Boolean));
+  return Object.fromEntries(
+    Object.entries(record || {}).filter(([key]) => allowed.has(key))
+  );
+}
+
 function replaceBentoChecksPeriodInStorage(userId, bentoChecks, year, month) {
   const { start, end } = getPeriodRange(year, month);
   const stored = loadBentoChecksFromStorage(userId);
@@ -348,19 +457,121 @@ function replaceBentoChecksPeriodInStorage(userId, bentoChecks, year, month) {
 
   for (const [name, byDate] of Object.entries(stored)) {
     const filtered = Object.fromEntries(
-      Object.entries(byDate || {}).filter(([dateStr, checked]) => !(dateStr >= start && dateStr <= end) && checked)
+      Object.entries(byDate || {}).filter(([dateStr, value]) => !(dateStr >= start && dateStr <= end) && isBentoCheckedValue(value))
     );
     if (Object.keys(filtered).length) next[name] = filtered;
   }
 
   for (const [name, byDate] of Object.entries(bentoChecks || {})) {
     const filtered = Object.fromEntries(
-      Object.entries(byDate || {}).filter(([dateStr, checked]) => dateStr >= start && dateStr <= end && checked)
+      Object.entries(byDate || {}).filter(([dateStr, value]) => dateStr >= start && dateStr <= end && isBentoCheckedValue(value))
     );
     if (Object.keys(filtered).length) next[name] = { ...(next[name] || {}), ...filtered };
   }
 
   saveBentoChecksToStorage(userId, next);
+}
+
+function mergeBentoChecks(dbChecks, localChecks, year, month, fallbackPrice = 0) {
+  const { start, end } = getPeriodRange(year, month);
+  const merged = {};
+  const names = new Set([
+    ...Object.keys(dbChecks || {}),
+    ...Object.keys(localChecks || {}),
+  ]);
+
+  for (const name of names) {
+    const byDate = {};
+    for (const [dateStr, value] of Object.entries(dbChecks?.[name] || {})) {
+      if (isBentoCheckedValue(value) && dateStr >= start && dateStr <= end) {
+        byDate[dateStr] = getBentoUnitPrice(value, resolveBentoFallbackPrice(fallbackPrice, name, dateStr));
+      }
+    }
+    for (const [dateStr, value] of Object.entries(localChecks?.[name] || {})) {
+      if (isBentoCheckedValue(value) && dateStr >= start && dateStr <= end && !byDate[dateStr]) {
+        byDate[dateStr] = getBentoUnitPrice(value, resolveBentoFallbackPrice(fallbackPrice, name, dateStr));
+      }
+    }
+    if (Object.keys(byDate).length) merged[name] = byDate;
+  }
+
+  return merged;
+}
+
+function getAttendanceShiftStorageKey(userId) {
+  return `torikoko:attendanceShift:${userId || "anon"}`;
+}
+
+function loadAttendanceShiftsFromStorage(userId) {
+  try {
+    const raw = localStorage.getItem(getAttendanceShiftStorageKey(userId));
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function mergeAttendanceShiftMap(attendance, shiftMap, year, month) {
+  const merged = {};
+  const { start, end } = getPeriodRange(year, month);
+  const names = new Set([
+    ...Object.keys(attendance || {}),
+    ...Object.keys(shiftMap || {}),
+  ]);
+
+  for (const name of names) {
+    const currentEntries = attendance?.[name] || {};
+    const storedShifts = Object.fromEntries(
+      Object.entries(shiftMap?.[name] || {}).filter(([dateStr]) => dateStr >= start && dateStr <= end)
+    );
+    const dates = new Set([
+      ...Object.keys(currentEntries),
+      ...Object.keys(storedShifts),
+    ]);
+    const nextEntries = {};
+
+    for (const dateStr of dates) {
+      const normalized = normalizeAttendanceEntry(currentEntries[dateStr] || {});
+      const storedShift = normalizeShiftType(storedShifts[dateStr]);
+      if (!normalized.shiftType && storedShift) normalized.shiftType = storedShift;
+      if (normalized.status || normalized.start || normalized.end || normalized.rawStart || normalized.rawEnd || normalized.modified || normalized.shiftType) {
+        nextEntries[dateStr] = normalized;
+      }
+    }
+
+    if (Object.keys(nextEntries).length) merged[name] = nextEntries;
+  }
+
+  return merged;
+}
+
+function replaceAttendanceShiftsPeriodInStorage(userId, allData, year, month) {
+  const { start, end } = getPeriodRange(year, month);
+  const stored = loadAttendanceShiftsFromStorage(userId);
+  const next = {};
+
+  for (const [name, byDate] of Object.entries(stored || {})) {
+    const filtered = Object.fromEntries(
+      Object.entries(byDate || {}).filter(([dateStr, shiftType]) => !(dateStr >= start && dateStr <= end) && normalizeShiftType(shiftType))
+    );
+    if (Object.keys(filtered).length) next[name] = filtered;
+  }
+
+  for (const [name, byDate] of Object.entries(allData || {})) {
+    const filtered = Object.fromEntries(
+      Object.entries(byDate || {})
+        .filter(([dateStr, entry]) => dateStr >= start && dateStr <= end && normalizeShiftType(entry?.shiftType))
+        .map(([dateStr, entry]) => [dateStr, normalizeShiftType(entry?.shiftType)])
+    );
+    if (Object.keys(filtered).length) next[name] = { ...(next[name] || {}), ...filtered };
+  }
+
+  try {
+    localStorage.setItem(getAttendanceShiftStorageKey(userId), JSON.stringify(next));
+  } catch {
+    // ignore storage quota / private mode issues
+  }
 }
 
 function t2m(t) {
@@ -384,6 +595,50 @@ function normalizePersonName(v) {
 function normalizeEmployment(v) {
   return v === "正社員" ? "正社員" : "パート";
 }
+function normalizeShiftType(v) {
+  const value = String(v || "").trim();
+  if (value === "morning" || value === "午前") return "morning";
+  if (value === "afternoon" || value === "午後") return "afternoon";
+  return "";
+}
+function getShiftLabel(shiftType) {
+  return TORIKOKO_SHIFT_RULES[normalizeShiftType(shiftType)]?.label || "";
+}
+function guessTorikokoShiftType(locationName, entry) {
+  if (normalizeLocation(locationName) !== "とりここ") return "";
+  const start = normalizeTimeStr(entry?.rawStart || entry?.start || entry?.roundedStart || "");
+  const end = normalizeTimeStr(entry?.rawEnd || entry?.end || entry?.roundedEnd || "");
+  const startMin = t2m(start);
+  const endMin = t2m(end);
+  if (startMin != null) {
+    if (startMin < 13 * 60) return "morning";
+    if (startMin >= 14 * 60) return "afternoon";
+  }
+  if (endMin != null) {
+    if (endMin <= 16 * 60) return "morning";
+    if (endMin >= 17 * 60) return "afternoon";
+  }
+  return "";
+}
+function getEntryShiftType(workRule, entry) {
+  return normalizeShiftType(entry?.shiftType) || guessTorikokoShiftType(workRule?.locationName, entry);
+}
+function applyEntryShiftRule(workRule = DEFAULT_WORK_RULE, entry = {}) {
+  const base = sanitizeRule(workRule);
+  if (normalizeLocation(base.locationName) !== "とりここ") return base;
+  const shiftType = getEntryShiftType(base, entry);
+  const shift = TORIKOKO_SHIFT_RULES[shiftType];
+  if (!shift) return base;
+  return {
+    ...sanitizeRule({
+      ...base,
+      snapEarlyThreshold: shift.start,
+      snapEarlyTo: shift.start,
+      businessEnd: shift.end,
+    }),
+    startRoundWindowMinutes: 30,
+  };
+}
 function getPaidLeaveUnits(status) {
   if (status === "有給休暇") return 1;
   if (status === "半有給") return 0.5;
@@ -391,6 +646,8 @@ function getPaidLeaveUnits(status) {
 }
 function normalizeAttendanceEntry(entry) {
   const e = { ...(entry || {}) };
+  e.shiftType = normalizeShiftType(e.shiftType);
+  if (!e.shiftType) delete e.shiftType;
   const hasAnyTime = !!(e.start || e.end || e.rawStart || e.rawEnd);
   if (!hasAnyTime && !e.modified && e.status === "出勤") {
     e.status = "";
@@ -469,11 +726,13 @@ function snapStart(ts, workRule = DEFAULT_WORK_RULE) {
   const t = t2m(ts);
   if (t == null) return ts;
   const r = sanitizeRule(workRule);
+  const earlyWindowMin = Math.max(0, Number(workRule?.startRoundWindowMinutes) || 0);
 
-  // 早朝スナップ：指定境界より前の時刻 → 境界時刻へ
+  // 早朝スナップ：指定境界より前で、かつ指定ウィンドウ内の時刻のみ境界時刻へ丸める
   const earlyThreshold = t2m(r.snapEarlyThreshold) ?? t2m(r.businessStart);
   const earlySnapTo    = t2m(r.snapEarlyTo)        ?? t2m(r.businessStart);
   if (earlyThreshold != null && earlySnapTo != null && t < earlyThreshold) {
+    if (earlyWindowMin > 0 && t < (earlyThreshold - earlyWindowMin)) return ts;
     return m2t(Math.max(earlyThreshold, earlySnapTo));
   }
 
@@ -508,18 +767,19 @@ function resolveAutoEnd(rawEnd, storedEnd, workRule = DEFAULT_WORK_RULE) {
 
 function resolveEntryTimes(entry, workRule = DEFAULT_WORK_RULE) {
   const e = entry || {};
+  const effectiveRule = applyEntryShiftRule(workRule, e);
   const effectiveStart = e.rawStart
-    ? (e.modified ? (e.start || snapStart(e.rawStart, workRule)) : snapStart(e.rawStart, workRule))
+    ? (e.modified ? (e.start || snapStart(e.rawStart, effectiveRule)) : snapStart(e.rawStart, effectiveRule))
     : (e.start || "");
   const effectiveEnd = e.rawEnd
-    ? (e.modified ? (e.end || resolveAutoEnd(e.rawEnd, e.end, workRule)) : resolveAutoEnd(e.rawEnd, e.end, workRule))
+    ? (e.modified ? (e.end || resolveAutoEnd(e.rawEnd, e.end, effectiveRule)) : resolveAutoEnd(e.rawEnd, e.end, effectiveRule))
     : (e.end || "");
   return { effectiveStart, effectiveEnd };
 }
 
-function calcWork(dateStr, startStr, endStr, workRule = DEFAULT_WORK_RULE, employmentType = DEFAULT_EMPLOYMENT_TYPE) {
+function calcWork(dateStr, startStr, endStr, workRule = DEFAULT_WORK_RULE, employmentType = DEFAULT_EMPLOYMENT_TYPE, entry = null) {
   if (!startStr || !endStr) return null;
-  const r = sanitizeRule(workRule);
+  const r = applyEntryShiftRule(workRule, entry || {});
   const br = getBreakRule(r, employmentType);
   const s = t2m(startStr), e = t2m(endStr);
   if (s == null || e == null || e <= s) return null;
@@ -557,7 +817,7 @@ function summarizeAttendanceMetrics(entries, periodDays, workRule = DEFAULT_WORK
     if (entry.status === "有給休暇") continue;
     const { effectiveStart, effectiveEnd } = resolveEntryTimes(entry, workRule);
     if (!effectiveStart || !effectiveEnd) continue;
-    const calc = calcWork(dateStr, effectiveStart, effectiveEnd, workRule, employmentType);
+    const calc = calcWork(dateStr, effectiveStart, effectiveEnd, workRule, employmentType, entry);
     if (!calc) continue;
     workDays++;
     totalWorkMin += calc.workMin;
@@ -608,13 +868,14 @@ function getCsvRoundedEnd(endStr, employmentType, locationName = "", workRule = 
 
 function getCsvDailyExportRow(entry, dateStr, workRule = DEFAULT_WORK_RULE, employmentType = DEFAULT_EMPLOYMENT_TYPE, locationName = "") {
   const normalized = normalizeAttendanceEntry(entry || {});
-  const { effectiveStart, effectiveEnd } = resolveEntryTimes(normalized, workRule);
-  const csvRoundedEnd = getCsvRoundedEnd(effectiveEnd, employmentType, locationName, workRule);
+  const effectiveRule = applyEntryShiftRule(workRule, normalized);
+  const { effectiveStart, effectiveEnd } = resolveEntryTimes(normalized, effectiveRule);
+  const csvRoundedEnd = getCsvRoundedEnd(effectiveEnd, employmentType, locationName, effectiveRule);
   const calc = effectiveStart && csvRoundedEnd
-    ? calcWork(dateStr, effectiveStart, csvRoundedEnd, workRule, employmentType)
+    ? calcWork(dateStr, effectiveStart, csvRoundedEnd, effectiveRule, employmentType, normalized)
     : null;
   const actualMin = normalized.rawStart && normalized.rawEnd
-    ? calcActualWork(normalized.rawStart, normalized.rawEnd, workRule, employmentType)
+    ? calcActualWork(normalized.rawStart, normalized.rawEnd, effectiveRule, employmentType)
     : null;
   const wasEndCapped = !!effectiveEnd && !!csvRoundedEnd && effectiveEnd !== csvRoundedEnd;
 
@@ -642,7 +903,7 @@ function summarizeCsvExportMetrics(entries, periodDays, workRule = DEFAULT_WORK_
     paidDays += getPaidLeaveUnits((entries?.[dateStr] || {}).status);
     if (row.status === "有給休暇") continue;
     if (!row.roundedStart || !row.roundedEnd) continue;
-    const calc = calcWork(dateStr, row.roundedStart, row.roundedEnd, workRule, employmentType);
+    const calc = calcWork(dateStr, row.roundedStart, row.roundedEnd, workRule, employmentType, entries?.[dateStr] || {});
     if (!calc) continue;
     workDays++;
     totalWorkMin += calc.workMin;
@@ -1068,6 +1329,11 @@ function isOnConflictTargetErr(error) {
   return t.includes("on conflict") && (t.includes("constraint") || t.includes("exclusion"));
 }
 
+function isNullColumnErr(error, column) {
+  const t = getErrText(error);
+  return t.includes("null value in column") && (t.includes(`"${column}"`) || t.includes(` ${column} `) || t.includes(column));
+}
+
 function isMissingRelationErr(error, relation) {
   const t = getErrText(error).toLowerCase();
   const rel = String(relation || "").toLowerCase();
@@ -1080,17 +1346,8 @@ function isMissingRelationErr(error, relation) {
 
 async function dbLoadAttendance(userId, year, month) {
   const { start, end } = getPeriodRange(year, month);
-  const run = async (withUser) => {
-    let q = supabase.from("attendance").select("*")
-      .gte("date_str", start).lte("date_str", end);
-    if (withUser && userId) q = q.eq("user_id", userId);
-    return q;
-  };
-
-  let { data, error } = await run(!!userId);
-  if (error && userId && isMissingColumnErr(error, "user_id")) {
-    ({ data, error } = await run(false));
-  }
+  let { data, error } = await supabase.from("attendance").select("*")
+    .gte("date_str", start).lte("date_str", end);
   if (error) throw error;
 
   const all = {};
@@ -1098,6 +1355,7 @@ async function dbLoadAttendance(userId, year, month) {
     if (!all[row.name]) all[row.name] = {};
     all[row.name][row.date_str] = normalizeAttendanceEntry({
       status:   row.status     || "",
+      shiftType: row.shift_type || "",
       start:    row.start_time || "",
       end:      row.end_time   || "",
       rawStart: row.raw_start  || "",
@@ -1110,42 +1368,27 @@ async function dbLoadAttendance(userId, year, month) {
 
 async function dbLoadBentoChecks(userId, year, month) {
   const { start, end } = getPeriodRange(year, month);
-  const run = async (withUser) => {
-    let q = supabase.from("bento_checks").select("*")
-      .gte("date_str", start).lte("date_str", end);
-    if (withUser && userId) q = q.eq("user_id", userId);
-    return q;
-  };
-
-  let { data, error } = await run(!!userId);
-  if (error && userId && isMissingColumnErr(error, "user_id")) {
-    ({ data, error } = await run(false));
-  }
+  let { data, error } = await supabase.from("bento_checks").select("*")
+    .gte("date_str", start).lte("date_str", end);
   if (error) throw error;
 
   const all = {};
   for (const row of data || []) {
     if (!row?.checked) continue;
     if (!all[row.name]) all[row.name] = {};
-    all[row.name][row.date_str] = true;
+    const unitPrice = Math.max(0, Number(row.unit_price) || 0);
+    all[row.name][row.date_str] = unitPrice > 0 ? unitPrice : true;
   }
   return all;
 }
 
 async function dbLoadSettings(userId) {
-  const run = async (withUser) => {
-    let q = supabase.from("employee_settings").select("*");
-    if (withUser && userId) q = q.eq("user_id", userId);
-    return q;
-  };
-
-  let { data, error } = await run(!!userId);
-  if (error && userId && isMissingColumnErr(error, "user_id")) {
-    ({ data, error } = await run(false));
-  }
+  let { data, error } = await supabase.from("employee_settings").select("*");
   if (error) throw error;
 
   const fare = {}, paid = {}, employment = {}, monthly = {}, location = {};
+  const fareConfig = {}, employeeOverrides = {};
+  const contractStart = {}, contractEnd = {};
   const retired = {}; // { name: { isRetired, retiredAt } }
   const registeredNames = []; // 登録済み全スタッフ（退職者含む）
   const extras = {}; // { name: [{ id, label, amount, periodKey }] }
@@ -1157,24 +1400,44 @@ async function dbLoadSettings(userId) {
     monthly[r.name]    = r.monthly_wage ?? 0;
     retired[r.name]    = { isRetired: !!r.is_retired, retiredAt: r.retired_at || "" };
     if (r.location) location[r.name] = r.location;
+    if (r.contract_start) contractStart[r.name] = r.contract_start;
+    if (r.contract_end) contractEnd[r.name] = r.contract_end;
+    if (r.fare_config_json) {
+      try { fareConfig[r.name] = JSON.parse(r.fare_config_json); } catch {}
+    }
+    if (r.override_rule_json) {
+      try {
+        const parsed = JSON.parse(r.override_rule_json);
+        if (parsed && typeof parsed === "object") employeeOverrides[r.name] = parsed;
+      } catch {}
+    }
     if (r.extras_json) {
       try { extras[r.name] = JSON.parse(r.extras_json); } catch {}
     }
     registeredNames.push(r.name);
   }
-  return { fare, paid, employment, monthly, retired, registeredNames, location, extras };
+  return {
+    fare, paid, employment, monthly, retired, registeredNames, location,
+    contractStart, contractEnd, fareConfig, employeeOverrides, extras
+  };
 }
 
 async function dbLoadWorkRules(userId) {
   let { data, error } = await supabase.from("workplace_rules").select("*");
   if (error) {
-    return { rulesByLocation: defaultRulesMap(), warning: `DBエラー[${error.code}]: ${error.message}` };
+    return {
+      rulesByLocation: defaultRulesMap(),
+      ruleModesByLocation: {},
+      warning: `DBエラー[${error.code}]: ${error.message}`
+    };
   }
 
   const rulesByLocation = {};
+  const ruleModesByLocation = {};
   for (const row of data || []) {
     const locationName = normalizeLocation(row.location_name);
     if (!locationName) continue;
+    ruleModesByLocation[locationName] = normalizeRuleMode(row.rule_mode);
     rulesByLocation[locationName] = sanitizeRule({
       locationName,
       businessStart: row.business_start, businessEnd: row.business_end,
@@ -1185,13 +1448,18 @@ async function dbLoadWorkRules(userId) {
       hourlyNormal: row.hourly_normal, hourlyWeekend: row.hourly_weekend,
     });
   }
-  return { rulesByLocation: Object.keys(rulesByLocation).length ? rulesByLocation : defaultRulesMap(), warning: "" };
+  return {
+    rulesByLocation: Object.keys(rulesByLocation).length ? rulesByLocation : defaultRulesMap(),
+    ruleModesByLocation,
+    warning: ""
+  };
 }
 
 async function dbUpsertWorkRule(userId, rule) {
   const r = sanitizeRule(rule);
   const base = {
     location_name: r.locationName,
+    rule_mode: normalizeRuleMode(rule?.ruleMode),
     business_start: r.businessStart, business_end: r.businessEnd,
     snap_early_threshold: r.snapEarlyThreshold, snap_early_to: r.snapEarlyTo,
     snap_range_start: r.snapRangeStart, snap_range_end: r.snapRangeEnd, snap_range_to: r.snapRangeTo,
@@ -1199,31 +1467,87 @@ async function dbUpsertWorkRule(userId, rule) {
     break_minutes_part_time: r.breakMinutesPartTime, break_threshold_minutes_part_time: r.breakThresholdMinutesPartTime,
     hourly_normal: r.hourlyNormal, hourly_weekend: r.hourlyWeekend,
   };
-  const attempts = [];
-  attempts.push({ payload: base, onConflict: "location_name" });
+  const attempts = [
+    { payload: base, onConflict: "location_name" },
+    { payload: Object.fromEntries(Object.entries(base).filter(([key]) => key !== "rule_mode")), onConflict: "location_name" },
+  ];
 
   let lastError = null;
   for (const attempt of attempts) {
     const { error } = await supabase.from("workplace_rules").upsert(attempt.payload, { onConflict: attempt.onConflict });
-    if (!error) return;
-    lastError = error;
+      if (!error) return;
+      lastError = error;
+      if (isMissingColumnErr(error, "rule_mode")) continue;
   }
   throw lastError;
 }
 
+async function dbLoadAppSettings(userId) {
+  let { data, error } = await supabase.from("app_settings").select("*");
+  if (error) {
+    if (isMissingRelationErr(error, "app_settings")) return { bentoPriceByLocation: {} };
+    throw error;
+  }
+
+  const bentoPriceByLocation = {};
+  for (const row of data || []) {
+    const appKey = String(row?.app_key || "");
+    const price = Math.max(0, Math.round(Number(row?.bento_price_per_meal) || 0));
+    if (appKey === "shared") {
+      bentoPriceByLocation[LEGACY_SHARED_BENTO_PRICE_KEY] = price;
+      continue;
+    }
+    if (!appKey.startsWith(BENTO_PRICE_APP_KEY_PREFIX)) continue;
+    const locationName = normalizeLocation(appKey.slice(BENTO_PRICE_APP_KEY_PREFIX.length));
+    if (!locationName) continue;
+    bentoPriceByLocation[locationName] = price;
+  }
+  return { bentoPriceByLocation };
+}
+
+async function dbUpsertAppSettings(userId, locationName, patch = {}) {
+  const base = {
+    app_key: getBentoAppKey(locationName),
+    ...("bentoPricePerMeal" in patch ? { bento_price_per_meal: Math.max(0, Number(patch.bentoPricePerMeal) || 0) } : {}),
+  };
+  const variants = [
+    base,
+    Object.fromEntries(Object.entries(base).filter(([key]) => key !== "bento_price_per_meal")),
+  ];
+  let lastError = null;
+  for (const variant of variants) {
+    const attempts = [{ payload: variant, onConflict: "app_key" }];
+    if (userId) {
+      attempts.push({ payload: { ...variant, user_id: userId }, onConflict: "user_id,app_key" });
+      attempts.push({ payload: { ...variant, user_id: userId }, onConflict: "app_key" });
+    }
+    for (const attempt of attempts) {
+      const { error } = await supabase.from("app_settings").upsert(attempt.payload, { onConflict: attempt.onConflict });
+      if (!error) return;
+      lastError = error;
+      if (isMissingRelationErr(error, "app_settings")) return;
+      if (isMissingColumnErr(error, "bento_price_per_meal")) break;
+      if (attempt.payload.user_id == null && userId && isNullColumnErr(error, "user_id")) continue;
+      if (attempt.payload.user_id != null && isMissingColumnErr(error, "user_id")) continue;
+      if (attempt.onConflict.includes("user_id") && isOnConflictTargetErr(error)) continue;
+    }
+  }
+  if (lastError) throw lastError;
+}
+
 async function dbUpsertPersonExtras(userId, name, extrasList) {
   const json = JSON.stringify(extrasList || []);
-  const attempts = [];
+  const attempts = [{ payload: { name, extras_json: json }, onConflict: "name" }];
   if (userId) {
     attempts.push({ payload: { user_id: userId, name, extras_json: json }, onConflict: "user_id,name" });
     attempts.push({ payload: { user_id: userId, name, extras_json: json }, onConflict: "name" });
   }
-  attempts.push({ payload: { name, extras_json: json }, onConflict: "name" });
   for (const attempt of attempts) {
     const { error } = await supabase.from("employee_settings").upsert(attempt.payload, { onConflict: attempt.onConflict });
     if (!error) return;
     // extras_json列が未作成の場合は無視（localStorage fallbackで動作継続）
     if (isMissingColumnErr(error, "extras_json")) return;
+    if (attempt.payload.user_id == null && userId && isNullColumnErr(error, "user_id")) continue;
     if (attempt.payload.user_id != null && isMissingColumnErr(error, "user_id")) continue;
     if (attempt.onConflict.includes("user_id") && isOnConflictTargetErr(error)) continue;
   }
@@ -1238,112 +1562,132 @@ async function dbUpsertAttendance(userId, name, dateStr, entry) {
   const base = {
     name, date_str: dateStr,
     status: entry.status ?? "",
+    shift_type: normalizeShiftType(entry.shiftType),
     start_time: entry.start ?? "",
     end_time: entry.end ?? "",
     raw_start: entry.rawStart ?? "",
     raw_end: entry.rawEnd ?? "",
     modified: !!entry.modified,
   };
+  const variants = [
+    base,
+    Object.fromEntries(Object.entries(base).filter(([key]) => key !== "shift_type")),
+  ];
   const attempts = [];
-  if (userId) {
-    attempts.push({ payload: { ...base, user_id: userId }, onConflict: "user_id,name,date_str" });
-    attempts.push({ payload: { ...base, user_id: userId }, onConflict: "name,date_str" });
-  }
-  attempts.push({ payload: base, onConflict: "name,date_str" });
-
   let lastError = null;
-  for (const attempt of attempts) {
-    const { error } = await supabase.from("attendance").upsert(attempt.payload, { onConflict: attempt.onConflict });
-    if (!error) return;
-    lastError = error;
-    if (attempt.payload.user_id != null && isMissingColumnErr(error, "user_id")) continue;
-    if (attempt.onConflict.includes("user_id") && isOnConflictTargetErr(error)) continue;
-    if (attempt.onConflict === "name,date_str" && isOnConflictTargetErr(error) && userId) continue;
+  for (const variant of variants) {
+    attempts.length = 0;
+    attempts.push({ payload: variant, onConflict: "name,date_str" });
+    if (userId) {
+      attempts.push({ payload: { ...variant, user_id: userId }, onConflict: "user_id,name,date_str" });
+      attempts.push({ payload: { ...variant, user_id: userId }, onConflict: "name,date_str" });
+    }
+
+    for (const attempt of attempts) {
+      const { error } = await supabase.from("attendance").upsert(attempt.payload, { onConflict: attempt.onConflict });
+      if (!error) return;
+      lastError = error;
+      if (isMissingColumnErr(error, "shift_type")) break;
+      if (attempt.payload.user_id == null && userId && isNullColumnErr(error, "user_id")) continue;
+      if (attempt.payload.user_id != null && isMissingColumnErr(error, "user_id")) continue;
+      if (attempt.onConflict.includes("user_id") && isOnConflictTargetErr(error)) continue;
+      if (attempt.onConflict === "name,date_str" && isOnConflictTargetErr(error) && userId) continue;
+    }
   }
   throw lastError;
 }
 
 async function dbDeleteAttendance(userId, name, dateStr) {
-  const run = async (withUser) => {
-    let q = supabase.from("attendance").delete().eq("name", name).eq("date_str", dateStr);
-    if (withUser && userId) q = q.eq("user_id", userId);
-    return q;
-  };
-  let { error } = await run(!!userId);
-  if (error && userId && isMissingColumnErr(error, "user_id")) {
-    ({ error } = await run(false));
-  }
+  let { error } = await supabase.from("attendance").delete().eq("name", name).eq("date_str", dateStr);
   if (error) throw error;
 }
 
-async function dbUpsertBentoCheck(userId, name, dateStr) {
+async function dbUpsertBentoCheck(userId, name, dateStr, unitPrice = 0) {
   const base = {
     name,
     date_str: dateStr,
     checked: true,
+    unit_price: Math.max(0, Math.round(Number(unitPrice) || 0)),
   };
-  const attempts = [];
-  if (userId) {
-    attempts.push({ payload: { ...base, user_id: userId }, onConflict: "user_id,name,date_str" });
-    attempts.push({ payload: { ...base, user_id: userId }, onConflict: "name,date_str" });
-  }
-  attempts.push({ payload: base, onConflict: "name,date_str" });
-
   let lastError = null;
-  for (const attempt of attempts) {
-    const { error } = await supabase.from("bento_checks").upsert(attempt.payload, { onConflict: attempt.onConflict });
-    if (!error) return;
-    lastError = error;
-    if (attempt.payload.user_id != null && isMissingColumnErr(error, "user_id")) continue;
-    if (attempt.onConflict.includes("user_id") && isOnConflictTargetErr(error)) continue;
-    if (attempt.onConflict === "name,date_str" && isOnConflictTargetErr(error) && userId) continue;
+  const variants = [
+    base,
+    Object.fromEntries(Object.entries(base).filter(([key]) => key !== "unit_price")),
+  ];
+  for (const payloadBase of variants) {
+    const attempts = [{ payload: payloadBase, onConflict: "name,date_str" }];
+    if (userId) {
+      attempts.push({ payload: { ...payloadBase, user_id: userId }, onConflict: "user_id,name,date_str" });
+      attempts.push({ payload: { ...payloadBase, user_id: userId }, onConflict: "name,date_str" });
+    }
+    for (const attempt of attempts) {
+      const { error } = await supabase.from("bento_checks").upsert(attempt.payload, { onConflict: attempt.onConflict });
+      if (!error) return;
+      lastError = error;
+      if (isMissingColumnErr(error, "unit_price")) break;
+      if (attempt.payload.user_id == null && userId && isNullColumnErr(error, "user_id")) continue;
+      if (attempt.payload.user_id != null && isMissingColumnErr(error, "user_id")) continue;
+      if (attempt.onConflict.includes("user_id") && isOnConflictTargetErr(error)) continue;
+      if (attempt.onConflict === "name,date_str" && isOnConflictTargetErr(error) && userId) continue;
+    }
   }
   throw lastError;
 }
 
 async function dbDeleteBentoCheck(userId, name, dateStr) {
-  const run = async (withUser) => {
-    let q = supabase.from("bento_checks").delete().eq("name", name).eq("date_str", dateStr);
-    if (withUser && userId) q = q.eq("user_id", userId);
-    return q;
-  };
-  let { error } = await run(!!userId);
-  if (error && userId && isMissingColumnErr(error, "user_id")) {
-    ({ error } = await run(false));
-  }
+  let { error } = await supabase.from("bento_checks").delete().eq("name", name).eq("date_str", dateStr);
   if (error) throw error;
 }
 
-async function dbUpsertSettings(userId, name, fare, paidLeaveWage, employmentType = DEFAULT_EMPLOYMENT_TYPE, monthlyWage = 0, location = "") {
+async function dbUpsertSettings(userId, name, fare, paidLeaveWage, employmentType = DEFAULT_EMPLOYMENT_TYPE, monthlyWage = 0, locationOrOptions = "") {
+  const options = typeof locationOrOptions === "string"
+    ? { location: locationOrOptions }
+    : (locationOrOptions || {});
   const base = {
     name, fare: fare ?? 0, paid_leave_wage: paidLeaveWage ?? 0,
     employment_type: normalizeEmployment(employmentType),
     monthly_wage: monthlyWage ?? 0,
-    ...(location ? { location } : {}),
+    ...(options.location ? { location: options.location } : {}),
+    ...("contractStart" in options ? { contract_start: options.contractStart || "" } : {}),
+    ...("contractEnd" in options ? { contract_end: options.contractEnd || "" } : {}),
+    ...("fareConfig" in options ? { fare_config_json: JSON.stringify(options.fareConfig || {}) } : {}),
+    ...("overrideRule" in options ? { override_rule_json: options.overrideRule ? JSON.stringify(options.overrideRule) : "" } : {}),
   };
 
   let lastError = null;
   const variants = [base];
 
   // 旧スキーマ互換: 新しい列が無い環境向けに段階的に列を削って再試行
+  if ("contract_end" in base) variants.push(Object.fromEntries(Object.entries(base).filter(([k]) => k !== "contract_end")));
+  if ("contract_start" in base) variants.push(Object.fromEntries(Object.entries(base).filter(([k]) => k !== "contract_start")));
+  if ("override_rule_json" in base) variants.push(Object.fromEntries(Object.entries(base).filter(([k]) => k !== "override_rule_json")));
+  if ("fare_config_json" in base) variants.push(Object.fromEntries(Object.entries(base).filter(([k]) => k !== "fare_config_json")));
   if ("location" in base) variants.push(Object.fromEntries(Object.entries(base).filter(([k]) => k !== "location")));
-  variants.push(Object.fromEntries(Object.entries(base).filter(([k]) => !["employment_type", "monthly_wage", "location"].includes(k))));
+  variants.push(Object.fromEntries(Object.entries(base).filter(([k]) => !["employment_type", "monthly_wage", "location", "contract_start", "contract_end", "fare_config_json", "override_rule_json"].includes(k))));
 
   for (const payloadBase of variants) {
-    const attempts = [];
+    const attempts = [{ payload: payloadBase, onConflict: "name" }];
     if (userId) {
       attempts.push({ payload: { ...payloadBase, user_id: userId }, onConflict: "user_id,name" });
       attempts.push({ payload: { ...payloadBase, user_id: userId }, onConflict: "name" });
     }
-    attempts.push({ payload: payloadBase, onConflict: "name" });
 
     for (const attempt of attempts) {
       const { error } = await supabase.from("employee_settings").upsert(attempt.payload, { onConflict: attempt.onConflict });
       if (!error) return;
       lastError = error;
+      if (attempt.payload.user_id == null && userId && isNullColumnErr(error, "user_id")) continue;
       if (attempt.payload.user_id != null && isMissingColumnErr(error, "user_id")) continue;
       if (attempt.onConflict.includes("user_id") && isOnConflictTargetErr(error)) continue;
-      if (isMissingColumnErr(error, "employment_type") || isMissingColumnErr(error, "monthly_wage") || isMissingColumnErr(error, "location")) {
+      if (
+        isMissingColumnErr(error, "employment_type") ||
+        isMissingColumnErr(error, "monthly_wage") ||
+        isMissingColumnErr(error, "location") ||
+        isMissingColumnErr(error, "contract_start") ||
+        isMissingColumnErr(error, "contract_end") ||
+        isMissingColumnErr(error, "fare_config_json") ||
+        isMissingColumnErr(error, "override_rule_json")
+      ) {
         break;
       }
     }
@@ -1353,17 +1697,17 @@ async function dbUpsertSettings(userId, name, fare, paidLeaveWage, employmentTyp
 
 async function dbSetRetired(userId, name, isRetired, retiredAt = "") {
   const base = { name, is_retired: isRetired, retired_at: retiredAt };
-  const attempts = [];
+  const attempts = [{ payload: base, onConflict: "name" }];
   if (userId) {
     attempts.push({ payload: { ...base, user_id: userId }, onConflict: "user_id,name" });
     attempts.push({ payload: { ...base, user_id: userId }, onConflict: "name" });
   }
-  attempts.push({ payload: base, onConflict: "name" });
   let lastError = null;
   for (const attempt of attempts) {
     const { error } = await supabase.from("employee_settings").upsert(attempt.payload, { onConflict: attempt.onConflict });
     if (!error) return;
     lastError = error;
+    if (attempt.payload.user_id == null && userId && isNullColumnErr(error, "user_id")) continue;
     if (attempt.payload.user_id != null && isMissingColumnErr(error, "user_id")) continue;
     if (attempt.onConflict.includes("user_id") && isOnConflictTargetErr(error)) continue;
     if (isMissingColumnErr(error, "is_retired") || isMissingColumnErr(error, "retired_at")) {
@@ -1375,15 +1719,7 @@ async function dbSetRetired(userId, name, isRetired, retiredAt = "") {
 
 async function dbDeleteEmployee(userId, name) {
   const runDelete = async (table) => {
-    const withUser = async () => {
-      let q = supabase.from(table).delete().eq("name", name);
-      if (userId) q = q.eq("user_id", userId);
-      return q;
-    };
-    let { error } = await withUser();
-    if (error && userId && isMissingColumnErr(error, "user_id")) {
-      ({ error } = await supabase.from(table).delete().eq("name", name));
-    }
+    const { error } = await supabase.from(table).delete().eq("name", name);
     if (error) throw error;
   };
   await runDelete("attendance");
@@ -1398,6 +1734,7 @@ async function dbDeleteEmployee(userId, name) {
 // ─── 勤怠テーブル（一人分）────────────────────────────────────────────────────
 function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpdate, onToggleBento, workRule, employmentType, bentoByDate, bentoPricePerMeal, monthlySalary, retiredAt, fareConfig, extras }) {
   const isFullTime = normalizeEmployment(employmentType) === "正社員";
+  const supportsDailyShift = normalizeLocation(workRule?.locationName) === "とりここ";
   const [editing, setEditing] = useState(null);
   const [tempVal, setTempVal] = useState("");
   const { year: prevYear, month: prevMonth } = getPreviousPeriod(year, month);
@@ -1406,13 +1743,14 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
 
   const commitEdit = useCallback((dateStr, field) => {
     const entry = { ...(entries[dateStr] || {}) };
+    const effectiveRule = applyEntryShiftRule(workRule, entry);
     if (tempVal.trim()) {
-      entry[field] = field === "start" ? snapStart(tempVal.trim(), workRule) : tempVal.trim();
+      entry[field] = field === "start" ? snapStart(tempVal.trim(), effectiveRule) : tempVal.trim();
       entry.modified = true;
     } else {
       delete entry[field];
     }
-    const isEmpty = !entry.start && !entry.end && !entry.status && !entry.rawStart && !entry.rawEnd;
+    const isEmpty = !entry.start && !entry.end && !entry.status && !entry.rawStart && !entry.rawEnd && !entry.shiftType;
     onUpdate(name, dateStr, isEmpty ? null : entry);
     setEditing(null); setTempVal("");
   }, [tempVal, entries, name, onUpdate, workRule]);
@@ -1422,9 +1760,23 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
       const current = { ...(entries[dateStr] || {}) };
       const next = { ...current, status: val, modified: !!val || !!current.modified };
       if (!val) delete next.status;
-      const isEmpty = !next.start && !next.end && !next.status && !next.rawStart && !next.rawEnd;
+      const isEmpty = !next.start && !next.end && !next.status && !next.rawStart && !next.rawEnd && !next.shiftType;
       return isEmpty ? null : next;
     })());
+
+  const setShiftType = (dateStr, shiftType) =>
+    {
+      const nextLabel = getShiftLabel(shiftType) || "未設定";
+      if (!window.confirm(`${name} の ${dateStr} のシフトを「${nextLabel}」で保存しますか？`)) return;
+      onUpdate(name, dateStr, (() => {
+      const current = normalizeAttendanceEntry(entries[dateStr] || {});
+      const normalizedShift = normalizeShiftType(shiftType);
+      const next = { ...current, shiftType: normalizedShift };
+      if (!normalizedShift) delete next.shiftType;
+      const isEmpty = !next.start && !next.end && !next.status && !next.rawStart && !next.rawEnd && !next.shiftType;
+      return isEmpty ? null : next;
+      })());
+    };
 
   const clearEntry = (dateStr) => onUpdate(name, dateStr, null);
 
@@ -1433,19 +1785,24 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
   const totals = useMemo(() =>
     days.reduce((a, { key }) => {
       const e = entries[key];
-      const hasBento = !!(bentoByDate && bentoByDate[key]);
-      const nextA = { ...a, bentoCount: a.bentoCount + (hasBento ? 1 : 0), paidDays: a.paidDays + getPaidLeaveUnits(e?.status) };
+      const bentoPrice = getBentoUnitPrice(bentoByDate?.[key], bentoPricePerMeal);
+      const nextA = {
+        ...a,
+        bentoCount: a.bentoCount + (bentoPrice > 0 ? 1 : 0),
+        bentoTotal: a.bentoTotal + bentoPrice,
+        paidDays: a.paidDays + getPaidLeaveUnits(e?.status),
+      };
       if (e?.status === "有給休暇") return nextA;
       const { effectiveStart, effectiveEnd } = resolveEntryTimes(e || {}, workRule);
       if (!effectiveStart || !effectiveEnd) return nextA;
-      const c = calcWork(key, effectiveStart, effectiveEnd, workRule, employmentType);
+      const c = calcWork(key, effectiveStart, effectiveEnd, workRule, employmentType, e || {});
       if (!c) return nextA;
       return { ...nextA, workMin: nextA.workMin + c.workMin, overtime: nextA.overtime + c.overtime,
         wage: nextA.wage + c.wage,
         overtimeWage: nextA.overtimeWage + Math.floor((c.overtime / 60) * c.rate),
         days: nextA.days + 1 };
-    }, { workMin: 0, overtime: 0, wage: 0, overtimeWage: 0, days: 0, paidDays: 0, bentoCount: 0 }),
-    [days, entries, workRule, employmentType, bentoByDate]
+    }, { workMin: 0, overtime: 0, wage: 0, overtimeWage: 0, days: 0, paidDays: 0, bentoCount: 0, bentoTotal: 0 }),
+    [days, entries, workRule, employmentType, bentoByDate, bentoPricePerMeal]
   );
   const prevSummary = useMemo(
     () => summarizeAttendanceMetrics(prevEntries || {}, getPeriodDays(prevYear, prevMonth), workRule, employmentType),
@@ -1497,14 +1854,18 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
             {days.map(({ mo, d, key, dow, wdJP }) => {
               const isSat = dow === 6, isSun = dow === 0, isHol = !!HOLIDAYS[key], isWeekend = isSat || isSun || isHol;
               const entry = normalizeAttendanceEntry(entries[key] || {});
+              const selectedShift = normalizeShiftType(entry.shiftType);
+              const shiftLabel = getShiftLabel(selectedShift);
               const { effectiveStart, effectiveEnd } = resolveEntryTimes(entry, workRule);
-              const calc = calcWork(key, effectiveStart, effectiveEnd, workRule, employmentType);
+              const calc = calcWork(key, effectiveStart, effectiveEnd, workRule, employmentType, entry);
               const actualWorkMin = (entry.rawStart && entry.rawEnd)
                 ? calcActualWork(entry.rawStart, entry.rawEnd, workRule, employmentType) : null;
               const isES = editing?.dateStr === key && editing?.field === "start";
               const isEE = editing?.dateStr === key && editing?.field === "end";
               const startSnapped = entry.rawStart && effectiveStart && entry.rawStart !== effectiveStart;
               const endSnapped   = entry.rawEnd   && effectiveEnd   && entry.rawEnd   !== effectiveEnd;
+              const bentoPrice = getBentoUnitPrice(bentoByDate?.[key], bentoPricePerMeal);
+              const hasBento = bentoPrice > 0;
 
               const isAfterRetirement = retiredAt && key > retiredAt;
               return (
@@ -1525,18 +1886,47 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
                   </td>
                   {/* 勤怠区分 */}
                   <td style={S.td}>
-                    <select value={entry.status || ""} onChange={(e) => setStatus(key, e.target.value)} style={{
-                      fontSize: 11, border: "1px solid #ddd", borderRadius: 5, padding: "3px 4px",
-                      color: entry.status ? "#1a1209" : "#aaa",
-                      background:
-                        entry.status === "出勤" ? "#f0faf0"
-                          : entry.status === "半有給" ? "#eff6ff"
-                          : entry.status ? "#fffbe6" : "#fafafa",
-                      cursor: "pointer", outline: "none", maxWidth: 78,
-                    }}>
-                      <option value="">—</option>
-                      {KINMU_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                    </select>
+                    <div style={{ display: "grid", gap: 4, justifyItems: "start" }}>
+                      <select
+                        value={entry.status || ""}
+                        onChange={(e) => setStatus(key, e.target.value)}
+                        style={{
+                          fontSize: 11, border: "1px solid #ddd", borderRadius: 5, padding: "3px 4px",
+                          color: entry.status ? "#1a1209" : "#aaa",
+                          background:
+                            entry.status === "出勤" ? "#f0faf0"
+                              : entry.status === "半有給" ? "#eff6ff"
+                              : entry.status ? "#fffbe6" : "#fafafa",
+                          cursor: "pointer", outline: "none", maxWidth: 78,
+                        }}
+                      >
+                        <option value="">—</option>
+                        {KINMU_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                      {supportsDailyShift && (
+                        <select
+                          value={selectedShift}
+                          onChange={(e) => setShiftType(key, e.target.value)}
+                          style={{
+                            fontSize: 10,
+                            border: selectedShift ? "1px solid #c7d2fe" : "1px solid #d6d3d1",
+                            borderRadius: 999,
+                            padding: "3px 8px",
+                            color: selectedShift ? "#4338ca" : "#94a3b8",
+                            background: selectedShift ? "#eef2ff" : "#fff",
+                            cursor: "pointer",
+                            outline: "none",
+                            minWidth: 72,
+                            fontWeight: selectedShift ? 700 : 500,
+                          }}
+                          title={shiftLabel ? `${shiftLabel}シフト` : "とりここの日別シフト"}
+                        >
+                          <option value="">シフト</option>
+                          <option value="morning">午前</option>
+                          <option value="afternoon">午後</option>
+                        </select>
+                      )}
+                    </div>
                   </td>
                   {/* 始業：実際 */}
                   <td style={{ ...S.td, borderLeft: "1px solid #f0ece4" }}>
@@ -1626,29 +2016,29 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
                         : <span style={{ color: "#ddd" }}>—</span>}
                   </td>
                   {/* お弁当 */}
-                  <td style={{ ...S.td, borderLeft: "1px solid #dcfce7", textAlign: "center", background: bentoByDate?.[key] ? "#f0fdf4" : "transparent" }}>
+                  <td style={{ ...S.td, borderLeft: "1px solid #dcfce7", textAlign: "center", background: hasBento ? "#f0fdf4" : "transparent" }}>
                     <button
                       type="button"
                       onClick={() => onToggleBento?.(name, key)}
                       style={{
                         minWidth: 42,
-                        border: bentoByDate?.[key] ? "1px solid #86efac" : "1px dashed #d1d5db",
-                        background: bentoByDate?.[key] ? "#dcfce7" : "#fff",
-                        color: bentoByDate?.[key] ? "#166534" : "#9ca3af",
+                        border: hasBento ? "1px solid #86efac" : "1px dashed #d1d5db",
+                        background: hasBento ? "#dcfce7" : "#fff",
+                        color: hasBento ? "#166534" : "#9ca3af",
                         borderRadius: 999,
                         padding: "4px 8px",
                         fontSize: 11,
                         fontWeight: 800,
                         cursor: "pointer",
                       }}
-                      title={bentoByDate?.[key] ? `お弁当あり ¥${bentoPricePerMeal}` : "お弁当なし"}
+                      title={hasBento ? `お弁当あり ¥${bentoPrice.toLocaleString()}` : "お弁当なし"}
                     >
-                      {bentoByDate?.[key] ? "🍱" : "＋"}
+                      {hasBento ? "🍱" : "＋"}
                     </button>
                   </td>
                   {/* クリア */}
                   <td style={{ ...S.td, textAlign: "center" }}>
-                    {(entry.start || entry.end || entry.status || entry.rawStart) &&
+                    {(entry.start || entry.end || entry.status || entry.rawStart || entry.rawEnd || entry.shiftType) &&
                       <button onClick={() => clearEntry(key)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ccc", fontSize: 11, padding: "2px 4px" }}>✕</button>}
                   </td>
                 </tr>
@@ -1720,7 +2110,7 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
           const paidTotal  = paidUnitAmount * totals.paidDays;
           const fareTotal  = calcFareTotal(name, totals.days, year, month, fareConfig, { [name]: fare });
           const extrasTotal = calcExtrasTotal(name, year, month, extras);
-          const bentoTotal = (bentoPricePerMeal || 0) * totals.bentoCount;
+          const bentoTotal = totals.bentoTotal;
           const grandTotal = Math.max(0, baseWage + paidTotal + fareTotal + extrasTotal - bentoTotal);
           const fareConfig_ = fareConfig?.[name] || { type: "daily" };
           const isTeiki    = fareConfig_.type === "teiki";
@@ -1772,7 +2162,8 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
                 <input type="number" min={0} step={10} value={bentoPricePerMeal || 0}
                   onChange={(e) => onUpdate(name, "__bento_price__", +e.target.value)}
                   style={{ width: 80, ...S.numInput, border: "1px solid rgba(252,165,165,0.5)", color: "#fca5a5" }} />
-                <span style={{ color: "#fca5a5", fontSize: 11 }}>× {totals.bentoCount}食</span>
+                <span style={{ color: "#fca5a5", fontSize: 11 }}>新規追加用</span>
+                <span style={{ color: "#fca5a5", fontSize: 11 }}>登録済み {totals.bentoCount}食</span>
               </div>
               <span style={{ color: "#fca5a5", fontSize: 15, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
                 － ¥{bentoTotal.toLocaleString()}
@@ -2083,7 +2474,7 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
                               />
                             </label>
                           </div>
-                          <div style={{ fontSize: 11, color: "#64748b" }}>個別設定では始め設定と終了設定の丸めを変更できます。</div>
+                          <div style={{ fontSize: 11, color: "#64748b" }}>始め設定は30分以内の早着だけ丸めます。終了設定はその時刻以降をその時刻に丸めます。</div>
                         </div>
                       </td>
                     </tr>
@@ -2422,7 +2813,7 @@ function IndividualSettingsModal({ name, year, month, fareSettings, fareConfig, 
 
 // ─── 給与一覧コンポーネント ────────────────────────────────────────────────────
 function SalarySummary({ names, year, month, allData, fareSettings, fareConfig, extras,
-  employmentSettings, getEffectiveRule, bentoChecksByName, bentoPricePerMeal, prevAllData,
+  employmentSettings, getEffectiveRule, bentoChecksByName, getBentoPriceForName, prevAllData,
   monthlySalarySettings, retiredSettings, onClickName }) {
 
   const rows = useMemo(() => names.map((name) => {
@@ -2431,8 +2822,6 @@ function SalarySummary({ names, year, month, allData, fareSettings, fareConfig, 
     const empType = normalizeEmployment(employmentSettings[name]);
     const isFullTime = empType === "正社員";
     const monthly = monthlySalarySettings[name] ?? 0;
-    const bento = bentoChecksByName[name] || {};
-    const price = bentoPricePerMeal || 0;
 
     const retiredAt = retiredSettings?.[name]?.isRetired ? (retiredSettings[name]?.retiredAt || null) : null;
     const periodDays = getPeriodDays(year, month).filter(({ key }) => !retiredAt || key <= retiredAt);
@@ -2445,13 +2834,15 @@ function SalarySummary({ names, year, month, allData, fareSettings, fareConfig, 
     let overtimeWage = 0;
     let days = currentSummary.workDays;
     let paidDays = currentSummary.paidDays;
-    let bentoCount = 0;
+    const bentoByDate = bentoChecksByName[name] || {};
+    const bentoPricePerMeal = getBentoPriceForName(name);
+    const bentoCount = countBentoEntries(bentoByDate, (dateStr) => periodDays.some((d) => d.key === dateStr));
+    const bentoTotal = sumBentoEntries(bentoByDate, bentoPricePerMeal, (dateStr) => periodDays.some((d) => d.key === dateStr));
     for (const { key: dateStr } of periodDays) {
       const e = normalizeAttendanceEntry(entries[dateStr]);
-      if (bento[dateStr]) bentoCount++;
       const { effectiveStart, effectiveEnd } = resolveEntryTimes(e || {}, rule);
       if (!effectiveStart || !effectiveEnd) continue;
-      const c = calcWork(dateStr, effectiveStart, effectiveEnd, rule, empType);
+      const c = calcWork(dateStr, effectiveStart, effectiveEnd, rule, empType, e || {});
       if (!c) continue;
       wage += c.wage;
       overtimeWage += Math.floor((c.overtime / 60) * c.rate);
@@ -2459,12 +2850,11 @@ function SalarySummary({ names, year, month, allData, fareSettings, fareConfig, 
     const fareTotal   = calcFareTotal(name, days, year, month, fareConfig, fareSettings);
     const extrasTotal = calcExtrasTotal(name, year, month, extras);
     const paidTotal   = Math.round((prevSummary.avgDailyMin / 60) * rule.hourlyNormal * paidDays);
-    const bentoTotal  = price * bentoCount;
     const baseWage    = isFullTime ? monthly + overtimeWage : wage;
     const total       = baseWage + fareTotal + extrasTotal + paidTotal - bentoTotal;
     return { name, isFullTime, days, paidDays, workMin, overtime, wage: baseWage, overtimeWage, fareTotal, extrasTotal, paidTotal, bentoCount, bentoTotal, total, retiredAt };
   }), [names, year, month, allData, fareSettings, fareConfig, extras,
-       employmentSettings, getEffectiveRule, bentoChecksByName, bentoPricePerMeal, prevAllData, monthlySalarySettings, retiredSettings]);
+       employmentSettings, getEffectiveRule, bentoChecksByName, getBentoPriceForName, prevAllData, monthlySalarySettings, retiredSettings]);
 
   const grand = useMemo(() => rows.reduce((a, r) => ({
     days:       a.days       + r.days,
@@ -2766,16 +3156,21 @@ export default function App() {
   const [preview,setPreview]= useState(null);
   const [importFailures, setImportFailures] = useState(null);
   const [loading,setLoading]= useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState("");
   const [exportScope, setExportScope] = useState("all");
   const [viewMode, setViewMode] = useState("detail"); // "detail" | "summary" | "staff" | "retired"
   const [storeSettingsOpen, setStoreSettingsOpen] = useState(false);
   const [fareConfig, setFareConfig] = useState({}); // { [name]: { type, teikiAmount, teikiPeriod, teikiNextBilling } }
   const [extras, setExtras]         = useState({}); // { [name]: [{ id, label, amount, periodKey }] }
   const extrasLoadedRef = useRef(false);
+  const attendanceShiftLoadedRef = useRef(false);
   const [settingsModalName, setSettingsModalName] = useState(null);
   const [bentoChecksByName, setBentoChecksByName] = useState({});
-  const [bentoPricePerMeal, setBentoPricePerMeal] = useState(500);
-  const [bentoStorageOnly, setBentoStorageOnly] = useState(false);
+  const [bentoPriceByLocation, setBentoPriceByLocation] = useState({
+    [LEGACY_SHARED_BENTO_PRICE_KEY]: DEFAULT_BENTO_PRICE_PER_MEAL,
+  });
+  const [, setBentoStorageOnly] = useState(false);
   const [retiredSettings, setRetiredSettings] = useState({}); // { name: { isRetired, retiredAt } }
   const [registeredNames, setRegisteredNames] = useState([]); // employee_settings 全登録名
   const fileRef = useRef();
@@ -2784,12 +3179,26 @@ export default function App() {
   const showToast = (msg, type = "ok") => {
     setToast({ msg, type }); setTimeout(() => setToast(null), 3500);
   };
+  const saveStamp = () => {
+    const now = new Date();
+    return `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+  };
 
   // ── 派生値 ──
   const locationNames = useMemo(
     () => Object.keys(workRulesByLocation).sort((a, b) => a.localeCompare(b, "ja")),
     [workRulesByLocation]
   );
+  const getBentoPriceForLocation = useCallback((locationName) => {
+    const normalized = normalizeLocation(locationName);
+    if (normalized && Object.prototype.hasOwnProperty.call(bentoPriceByLocation, normalized)) {
+      return Math.max(0, Math.round(Number(bentoPriceByLocation[normalized]) || 0));
+    }
+    if (Object.prototype.hasOwnProperty.call(bentoPriceByLocation, LEGACY_SHARED_BENTO_PRICE_KEY)) {
+      return Math.max(0, Math.round(Number(bentoPriceByLocation[LEGACY_SHARED_BENTO_PRICE_KEY]) || 0));
+    }
+    return DEFAULT_BENTO_PRICE_PER_MEAL;
+  }, [bentoPriceByLocation]);
 
   // 現在の店舗に所属するスタッフだけ表示
   const allNames = useMemo(() => {
@@ -2865,6 +3274,9 @@ export default function App() {
     if (workRulesByLocation[activeLocation]) return activeLocation;
     return DEFAULT_WORK_RULE.locationName;
   }, [employeeLocation, workRulesByLocation, activeLocation]);
+  const getBentoPriceForName = useCallback((name) => {
+    return getBentoPriceForLocation(getLocationForName(name));
+  }, [getBentoPriceForLocation, getLocationForName]);
 
   const getEffectiveRuleAtLocation = useCallback((name, locationHint) => {
     const hinted = normalizeLocation(locationHint);
@@ -2875,11 +3287,14 @@ export default function App() {
     // 始め設定・終了設定の丸めは設定モードに関わらず個別指定できる。
     const contractStart = contractStartByName[name];
     if (contractStart) {
-      rule = sanitizeRule({
-        ...rule,
-        snapEarlyThreshold: contractStart,
-        snapEarlyTo: contractStart,
-      });
+      rule = {
+        ...sanitizeRule({
+          ...rule,
+          snapEarlyThreshold: contractStart,
+          snapEarlyTo: contractStart,
+        }),
+        startRoundWindowMinutes: 30,
+      };
     }
     const contractEnd = contractEndByName[name];
     if (contractEnd) {
@@ -2890,7 +3305,7 @@ export default function App() {
     }
 
     return rule;
-  }, [getLocationForName, workRulesByLocation, employeeOverrides, contractStartByName, contractEndByName]);
+  }, [getLocationForName, workRulesByLocation, contractStartByName, contractEndByName]);
   const getEffectiveRule = useCallback((name) => {
     return getEffectiveRuleAtLocation(name, getLocationForName(name));
   }, [getEffectiveRuleAtLocation, getLocationForName]);
@@ -2906,6 +3321,24 @@ export default function App() {
   const activeEffectiveRule = activeName ? getEffectiveRule(activeName) : activeWorkRule;
   const activeEmploymentType = normalizeEmployment(employmentSettings[activeName]);
   const activeRuleMode = normalizeRuleMode(ruleModeByLocation[activeLocation]);
+  const activeBentoPricePerMeal = activeName ? getBentoPriceForName(activeName) : getBentoPriceForLocation(activeLocation);
+  const buildEmployeeSettingOptions = useCallback((name, patch = {}) => ({
+    location: Object.prototype.hasOwnProperty.call(patch, "location")
+      ? (patch.location || DEFAULT_WORK_RULE.locationName)
+      : (employeeLocation[name] || DEFAULT_WORK_RULE.locationName),
+    contractStart: Object.prototype.hasOwnProperty.call(patch, "contractStart")
+      ? (patch.contractStart || "")
+      : (contractStartByName[name] || ""),
+    contractEnd: Object.prototype.hasOwnProperty.call(patch, "contractEnd")
+      ? (patch.contractEnd || "")
+      : (contractEndByName[name] || ""),
+    fareConfig: Object.prototype.hasOwnProperty.call(patch, "fareConfig")
+      ? (patch.fareConfig || {})
+      : (fareConfig[name] || {}),
+    overrideRule: Object.prototype.hasOwnProperty.call(patch, "overrideRule")
+      ? (patch.overrideRule || null)
+      : (employeeOverrides[name] || null),
+  }), [employeeLocation, contractStartByName, contractEndByName, fareConfig, employeeOverrides]);
   const activePeriodWorkDays = useMemo(() => {
     if (!activeName) return 0;
     const entries = allData[activeName] || {};
@@ -2916,7 +3349,8 @@ export default function App() {
       return !!(entry?.start && entry?.end);
     }).length;
   }, [activeName, allData, year, month]);
-  const updateEmployeeOverrideRule = useCallback((name, patch) => {
+  const updateEmployeeOverrideRule = useCallback(async (name, patch) => {
+    let nextOverride = null;
     setEmployeeOverrides((prev) => {
       const loc = getLocationForName(name);
       const base = sanitizeRule(workRulesByLocation[loc] || { ...DEFAULT_WORK_RULE, locationName: loc });
@@ -2926,38 +3360,99 @@ export default function App() {
       if ("breakThresholdMinutesPartTime_h" in patch) converted.breakThresholdMinutesPartTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesPartTime_h) || 0) * 60));
       delete converted.breakThresholdMinutesFullTime_h;
       delete converted.breakThresholdMinutesPartTime_h;
+      nextOverride = {
+        enabled: true,
+        rule: sanitizeRule({ ...current, ...converted, locationName: base.locationName }),
+      };
       return {
         ...prev,
-        [name]: {
-          enabled: true,
-          rule: sanitizeRule({ ...current, ...converted, locationName: base.locationName }),
-        },
+        [name]: nextOverride,
       };
     });
-  }, [getLocationForName, workRulesByLocation]);
-  const resetEmployeeOverrideRule = useCallback((name) => {
+    if (!user) return;
+    try {
+      await dbUpsertSettings(
+        user.id,
+        name,
+        fareSettings[name] ?? 0,
+        paidLeaveSettings[name] ?? 0,
+        employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
+        monthlySalarySettings[name] ?? 0,
+        buildEmployeeSettingOptions(name, { overrideRule: nextOverride })
+      );
+    } catch (e) {
+      showToast(`保存エラー: ${e.message}`, "err");
+    }
+  }, [user, getLocationForName, workRulesByLocation, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
+  const resetEmployeeOverrideRule = useCallback(async (name) => {
     setEmployeeOverrides((prev) => {
       const next = { ...prev };
       delete next[name];
       return next;
     });
-  }, []);
-  const updateContractStart = useCallback((name, value) => {
+    if (!user) return;
+    try {
+      await dbUpsertSettings(
+        user.id,
+        name,
+        fareSettings[name] ?? 0,
+        paidLeaveSettings[name] ?? 0,
+        employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
+        monthlySalarySettings[name] ?? 0,
+        buildEmployeeSettingOptions(name, { overrideRule: null })
+      );
+    } catch (e) {
+      showToast(`保存エラー: ${e.message}`, "err");
+    }
+  }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
+  const confirmSettingSave = useCallback((message) => window.confirm(`${message}\n保存しますか？`), []);
+  const saveContractSettings = useCallback(async (name, patch = {}) => {
+    if (!user) return;
+    const nextStart = Object.prototype.hasOwnProperty.call(patch, "contractStart")
+      ? (patch.contractStart || "")
+      : (contractStartByName[name] || "");
+    const nextEnd = Object.prototype.hasOwnProperty.call(patch, "contractEnd")
+      ? (patch.contractEnd || "")
+      : (contractEndByName[name] || "");
+
     setContractStartByName((prev) => {
       const next = { ...prev };
-      if (value) next[name] = value;
+      if (nextStart) next[name] = nextStart;
       else delete next[name];
       return next;
     });
-  }, []);
-  const updateContractEnd = useCallback((name, value) => {
     setContractEndByName((prev) => {
       const next = { ...prev };
-      if (value) next[name] = value;
+      if (nextEnd) next[name] = nextEnd;
       else delete next[name];
       return next;
     });
-  }, []);
+
+    try {
+      await dbUpsertSettings(
+        user.id,
+        name,
+        fareSettings[name] ?? 0,
+        paidLeaveSettings[name] ?? 0,
+        employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
+        monthlySalarySettings[name] ?? 0,
+        buildEmployeeSettingOptions(name, { contractStart: nextStart, contractEnd: nextEnd })
+      );
+      showToast(`${name} の丸め設定を保存しました ✓`);
+    } catch (e) {
+      showToast(`保存エラー: ${e.message}`, "err");
+    }
+  }, [user, contractStartByName, contractEndByName, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
+  const updateContractStart = useCallback(async (name, value) => {
+    const label = value || "未設定";
+    if (!confirmSettingSave(`${name} の始め設定を「${label}」で保存します。`)) return;
+    await saveContractSettings(name, { contractStart: value || "" });
+  }, [confirmSettingSave, saveContractSettings]);
+  const updateContractEnd = useCallback(async (name, value) => {
+    const label = value || "未設定";
+    if (!confirmSettingSave(`${name} の終了設定を「${label}」で保存します。`)) return;
+    await saveContractSettings(name, { contractEnd: value || "" });
+  }, [confirmSettingSave, saveContractSettings]);
 
   // ── ローカルストレージ（overrides・UI設定は軽量なのでlocalStorageで可） ──
   useEffect(() => {
@@ -2975,6 +3470,8 @@ export default function App() {
       if (savedContractEnd) setContractEndByName(JSON.parse(savedContractEnd));
       const savedFareConfig = localStorage.getItem(`torikoko:fareConfig:${user.id}`);
       if (savedFareConfig) setFareConfig(JSON.parse(savedFareConfig));
+      const savedBentoPriceMap = loadBentoPriceMapFromStorage(user.id);
+      if (Object.keys(savedBentoPriceMap).length > 0) setBentoPriceByLocation(savedBentoPriceMap);
       const savedExtras = localStorage.getItem(`torikoko:extras:${user.id}`);
       if (savedExtras) setExtras(JSON.parse(savedExtras));
       extrasLoadedRef.current = true;
@@ -3003,8 +3500,17 @@ export default function App() {
   }, [user, contractEndByName]);
   useEffect(() => {
     if (!user) return;
+    if (!attendanceShiftLoadedRef.current) return;
+    replaceAttendanceShiftsPeriodInStorage(user.id, allData, year, month);
+  }, [user, allData, year, month]);
+  useEffect(() => {
+    if (!user) return;
     try { localStorage.setItem(`torikoko:fareConfig:${user.id}`, JSON.stringify(fareConfig)); } catch { }
   }, [user, fareConfig]);
+  useEffect(() => {
+    if (!user) return;
+    saveBentoPriceMapToStorage(user.id, bentoPriceByLocation);
+  }, [user, bentoPriceByLocation]);
   useEffect(() => {
     if (!user) return;
     if (!extrasLoadedRef.current) return;
@@ -3023,12 +3529,15 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     let alive = true;
+    attendanceShiftLoadedRef.current = false;
     (async () => {
       try {
         setLoading(true);
         const prevPeriod = getPreviousPeriod(year, month);
         const localBento = loadBentoChecksFromStorage(user.id);
-        const [att, prevAtt, st, rulesResult, bentoResult] = await Promise.all([
+        const localBentoPriceMap = loadBentoPriceMapFromStorage(user.id);
+        const localShiftMap = loadAttendanceShiftsFromStorage(user.id);
+        const [att, prevAtt, st, rulesResult, bentoResult, appSettings] = await Promise.all([
           dbLoadAttendance(user.id, year, month),
           dbLoadAttendance(user.id, prevPeriod.year, prevPeriod.month),
           dbLoadSettings(user.id),
@@ -3036,12 +3545,54 @@ export default function App() {
           dbLoadBentoChecks(user.id, year, month)
             .then((data) => ({ data, error: null }))
             .catch((error) => ({ data: null, error })),
+          dbLoadAppSettings(user.id),
         ]);
         if (!alive) return;
+        const mergedBentoPriceMap = normalizeBentoPriceMap({
+          ...localBentoPriceMap,
+          ...(appSettings?.bentoPriceByLocation || {}),
+        });
+        const getInitialBentoPriceForLocation = (locationName) => {
+          const normalized = normalizeLocation(locationName);
+          if (normalized && Object.prototype.hasOwnProperty.call(mergedBentoPriceMap, normalized)) {
+            return mergedBentoPriceMap[normalized];
+          }
+          if (Object.prototype.hasOwnProperty.call(mergedBentoPriceMap, LEGACY_SHARED_BENTO_PRICE_KEY)) {
+            return mergedBentoPriceMap[LEGACY_SHARED_BENTO_PRICE_KEY];
+          }
+          return DEFAULT_BENTO_PRICE_PER_MEAL;
+        };
+        const mergedAttendance = mergeAttendanceShiftMap(att, localShiftMap, year, month);
+        const mergedPrevAttendance = mergeAttendanceShiftMap(prevAtt, localShiftMap, prevPeriod.year, prevPeriod.month);
+        const mergedBento = mergeBentoChecks(
+          bentoResult.data || {},
+          localBento || {},
+          year,
+          month,
+          (name) => getInitialBentoPriceForLocation(st.location?.[name] || DEFAULT_WORK_RULE.locationName)
+        );
+        const knownNames = Array.from(new Set([
+          ...Object.keys(mergedAttendance || {}),
+          ...(st.registeredNames || []),
+          ...Object.keys(st.fare || {}),
+          ...Object.keys(st.paid || {}),
+          ...Object.keys(st.employment || {}),
+          ...Object.keys(st.monthly || {}),
+          ...Object.keys(st.location || {}),
+          ...Object.keys(st.contractStart || {}),
+          ...Object.keys(st.contractEnd || {}),
+          ...Object.keys(st.fareConfig || {}),
+          ...Object.keys(st.employeeOverrides || {}),
+          ...Object.keys(st.extras || {}),
+        ])).filter(Boolean);
+        const knownLocations = Array.from(new Set([
+          ...Object.keys(rulesResult.rulesByLocation || {}),
+          ...DEFAULT_LOCATIONS,
+        ])).filter(Boolean);
         // employee_settings登録済み全スタッフをallDataにマージ（勤怠データなしの月でも表示）
         // DBからのregisteredNames ＋ 既存のregisteredNamesステート（フォールバック）の両方を使用
         setAllData((prevAllData) => {
-          const merged = { ...att };
+          const merged = { ...mergedAttendance };
           // DBから取得した登録名
           for (const n of (st.registeredNames || [])) {
             if (!merged[n]) merged[n] = {};
@@ -3052,29 +3603,46 @@ export default function App() {
           }
           return merged;
         });
-        setPrevAllData(prevAtt);
+        setPrevAllData(mergedPrevAttendance);
         const useStorageOnly = !!(bentoResult.error && isMissingRelationErr(bentoResult.error, "bento_checks"));
         setBentoStorageOnly(useStorageOnly);
-        if (bentoResult.data) {
-          setBentoChecksByName(bentoResult.data);
-        } else {
-          setBentoChecksByName(localBento);
+        setBentoChecksByName(mergedBento);
+        replaceBentoChecksPeriodInStorage(user.id, mergedBento, year, month);
+        if (!useStorageOnly && bentoResult.data) {
+          const missingFromDb = [];
+          Object.entries(mergedBento).forEach(([name, byDate]) => {
+            Object.entries(byDate || {}).forEach(([dateStr, unitPrice]) => {
+              const currentDbValue = bentoResult.data?.[name]?.[dateStr];
+              const fallbackPrice = getInitialBentoPriceForLocation(st.location?.[name] || DEFAULT_WORK_RULE.locationName);
+              const needsBackfill = !isBentoCheckedValue(currentDbValue) || getBentoUnitPrice(currentDbValue, fallbackPrice) <= 0;
+              if (needsBackfill) missingFromDb.push({ name, dateStr, unitPrice });
+            });
+          });
+          if (missingFromDb.length > 0 && alive) {
+            Promise.allSettled(missingFromDb.map(({ name, dateStr, unitPrice }) => dbUpsertBentoCheck(user.id, name, dateStr, unitPrice))).catch(() => {});
+          }
         }
         setFareSettings(st.fare);
         setPaidLeaveSettings(st.paid);
         setEmploymentSettings(st.employment);
         setMonthlySalarySettings(st.monthly);
+        setContractStartByName((prev) => ({ ...filterRecordByKeys(prev, knownNames), ...(st.contractStart || {}) }));
+        setContractEndByName((prev) => ({ ...filterRecordByKeys(prev, knownNames), ...(st.contractEnd || {}) }));
+        setFareConfig((prev) => ({ ...filterRecordByKeys(prev, knownNames), ...(st.fareConfig || {}) }));
+        setEmployeeOverrides((prev) => ({ ...filterRecordByKeys(prev, knownNames), ...(st.employeeOverrides || {}) }));
+        setBentoPriceByLocation((prev) => normalizeBentoPriceMap({
+          ...filterRecordByKeys(prev, [...knownLocations, LEGACY_SHARED_BENTO_PRICE_KEY]),
+          ...mergedBentoPriceMap,
+        }));
         setRetiredSettings(st.retired || {});
         setRegisteredNames(st.registeredNames || []);
         // DB の extras を localStorage とマージ（DB優先）
-        if (st.extras && Object.keys(st.extras).length > 0) {
-          setExtras((prev) => ({ ...prev, ...st.extras }));
-          extrasLoadedRef.current = true;
-        }
+        setExtras((prev) => ({ ...filterRecordByKeys(prev, knownNames), ...(st.extras || {}) }));
+        extrasLoadedRef.current = true;
         // 所属店舗は DB を正としてマージする。
         // 以前の localStorage が残っていても、DB に保存済みの店舗で上書きする。
         setEmployeeLocation((prev) => {
-          const merged = { ...prev };
+          const merged = filterRecordByKeys(prev, knownNames);
           // DB の値があれば常に優先
           for (const [n, loc] of Object.entries(st.location || {})) {
             merged[n] = loc;
@@ -3090,13 +3658,20 @@ export default function App() {
                 st.paid?.[n] ?? 0,
                 st.employment?.[n] ?? DEFAULT_EMPLOYMENT_TYPE,
                 st.monthly?.[n] ?? 0,
-                merged[n]
+                {
+                  location: merged[n],
+                  contractStart: st.contractStart?.[n] || "",
+                  contractEnd: st.contractEnd?.[n] || "",
+                  fareConfig: st.fareConfig?.[n] || {},
+                  overrideRule: st.employeeOverrides?.[n] || null,
+                }
               )
             )).catch(() => {});
           }
           return merged;
         });
         setWorkRulesByLocation(rulesResult.rulesByLocation);
+        setRuleModeByLocation((prev) => ({ ...filterRecordByKeys(prev, knownLocations), ...(rulesResult.ruleModesByLocation || {}) }));
         // DBに店舗データが無い場合は3店舗をデフォルト保存
         if (Object.keys(rulesResult.rulesByLocation).length === 0 || !rulesResult.warning) {
           const defaults = defaultRulesMap();
@@ -3113,8 +3688,9 @@ export default function App() {
         if (bentoResult.error && !isMissingRelationErr(bentoResult.error, "bento_checks")) {
           showToast(`お弁当保存読込エラー: ${bentoResult.error.message}`, "err");
         }
-        const first = Object.keys(att)[0] || (st.registeredNames || [])[0] || Object.keys(st.fare)[0] || "";
+        const first = Object.keys(mergedAttendance)[0] || (st.registeredNames || [])[0] || Object.keys(st.fare)[0] || "";
         setActiveName((prev) => prev || first);
+        attendanceShiftLoadedRef.current = true;
       } catch (e) {
         if (alive) showToast(`読込エラー: ${e.message}`, "err");
       } finally {
@@ -3136,9 +3712,14 @@ export default function App() {
 
   const logout = async () => {
     await supabase.auth.signOut();
+    attendanceShiftLoadedRef.current = false;
+    extrasLoadedRef.current = false;
     setUser(null); setAllData({}); setPrevAllData({}); setFareSettings({}); setPaidLeaveSettings({});
-    setEmploymentSettings({}); setEmployeeOverrides({}); setActiveName("");
+    setEmploymentSettings({}); setMonthlySalarySettings({}); setEmployeeOverrides({}); setActiveName("");
+    setContractStartByName({}); setContractEndByName({}); setFareConfig({}); setExtras({});
+    setEmployeeLocation({}); setRuleModeByLocation({}); setRetiredSettings({}); setRegisteredNames([]);
     setBentoChecksByName({}); setBentoStorageOnly(false);
+    setBentoPriceByLocation({ [LEGACY_SHARED_BENTO_PRICE_KEY]: DEFAULT_BENTO_PRICE_PER_MEAL }); setSaveBusy(false); setLastSavedAt("");
     setWorkRulesByLocation(defaultRulesMap());
   };
 
@@ -3157,8 +3738,20 @@ export default function App() {
 
     const next = sanitizeRule({ ...current, ...converted, locationName: activeLocation });
     setWorkRulesByLocation((prev) => ({ ...prev, [activeLocation]: next }));
-    try { await dbUpsertWorkRule(user.id, next); } catch (e) { showToast(`ルール保存エラー: ${e.message}`, "err"); }
-  }, [user, activeLocation, workRulesByLocation]);
+    try { await dbUpsertWorkRule(user.id, { ...next, ruleMode: activeRuleMode }); } catch (e) { showToast(`ルール保存エラー: ${e.message}`, "err"); }
+  }, [user, activeLocation, workRulesByLocation, activeRuleMode]);
+
+  const updateRuleMode = useCallback(async (locationName, mode) => {
+    const normalizedMode = normalizeRuleMode(mode);
+    setRuleModeByLocation((prev) => ({ ...prev, [locationName]: normalizedMode }));
+    if (!user) return;
+    try {
+      const rule = sanitizeRule(workRulesByLocation[locationName] || { ...DEFAULT_WORK_RULE, locationName });
+      await dbUpsertWorkRule(user.id, { ...rule, locationName, ruleMode: normalizedMode });
+    } catch (e) {
+      showToast(`設定保存エラー: ${e.message}`, "err");
+    }
+  }, [user, workRulesByLocation]);
 
   const addLocation = useCallback(async () => {
     if (!user) return;
@@ -3183,6 +3776,11 @@ export default function App() {
     const affectedNames = Array.from(new Set([...Object.keys(allData), ...registeredNames]))
       .filter((name) => (normalizeLocation(employeeLocation[name]) || DEFAULT_WORK_RULE.locationName) === activeLocation);
     setWorkRulesByLocation(next);
+    setRuleModeByLocation((prev) => {
+      const updated = { ...prev };
+      delete updated[activeLocation];
+      return updated;
+    });
     setEmployeeLocation((prev) => {
       const updated = { ...prev };
       affectedNames.forEach((name) => { updated[name] = fallback; });
@@ -3198,14 +3796,14 @@ export default function App() {
           paidLeaveSettings[name] ?? 0,
           employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
           monthlySalarySettings[name] ?? 0,
-          fallback
+          buildEmployeeSettingOptions(name, { location: fallback })
         ))
       );
       await dbDeleteWorkRule(user.id, activeLocation);
       const failed = locationResults.filter((r) => r.status === "rejected").length;
       if (failed > 0) showToast(`所属店舗の再保存で${failed}件失敗しました`, "err");
     } catch (e) { showToast(`削除エラー: ${e.message}`, "err"); }
-  }, [user, workRulesByLocation, locationNames, activeLocation, allData, registeredNames, employeeLocation, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings]);
+  }, [user, workRulesByLocation, locationNames, activeLocation, allData, registeredNames, employeeLocation, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
 
   // ── 勤怠データ更新 ──
   const handleUpdate = useCallback(async (name, dateStrOrField, entryOrVal) => {
@@ -3214,23 +3812,26 @@ export default function App() {
       if (dateStrOrField === "__fare__") {
         const val = entryOrVal ?? 0;
         setFareSettings((prev) => ({ ...prev, [name]: val }));
-        await dbUpsertSettings(user.id, name, val, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0);
+        await dbUpsertSettings(user.id, name, val, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0, buildEmployeeSettingOptions(name));
         return;
       }
       if (dateStrOrField === "__paid__") {
         const val = entryOrVal ?? 0;
         setPaidLeaveSettings((prev) => ({ ...prev, [name]: val }));
-        await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, val, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0);
+        await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, val, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0, buildEmployeeSettingOptions(name));
         return;
       }
       if (dateStrOrField === "__monthly__") {
         const val = entryOrVal ?? 0;
         setMonthlySalarySettings((prev) => ({ ...prev, [name]: val }));
-        await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, val);
+        await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, val, buildEmployeeSettingOptions(name));
         return;
       }
       if (dateStrOrField === "__bento_price__") {
-        setBentoPricePerMeal(entryOrVal ?? 0);
+        const nextPrice = Math.max(0, Number(entryOrVal) || 0);
+        const locationName = getLocationForName(name) || activeLocation;
+        setBentoPriceByLocation((prev) => ({ ...prev, [locationName]: nextPrice }));
+        await dbUpsertAppSettings(user.id, locationName, { bentoPricePerMeal: nextPrice });
         return;
       }
       const dateStr = dateStrOrField;
@@ -3244,19 +3845,21 @@ export default function App() {
     } catch (e) {
       showToast(`保存エラー: ${e.message}`, "err");
     }
-  }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings]);
+  }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions, getLocationForName, activeLocation]);
 
   const updateEmploymentType = useCallback(async (name, type) => {
     if (!user) return;
     const normalized = normalizeEmployment(type);
+    if (!confirmSettingSave(`${name} の雇用区分を「${normalized}」で保存します。`)) return;
     setEmploymentSettings((prev) => ({ ...prev, [name]: normalized }));
-    try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0, normalized, monthlySalarySettings[name] ?? 0); }
+    try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0, normalized, monthlySalarySettings[name] ?? 0, buildEmployeeSettingOptions(name)); }
     catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
-  }, [user, fareSettings, paidLeaveSettings, monthlySalarySettings]);
+  }, [user, fareSettings, paidLeaveSettings, monthlySalarySettings, confirmSettingSave, buildEmployeeSettingOptions]);
 
   // ── スタッフ管理用コールバック ──
   const saveEmployeeLocation = useCallback(async (name, loc, options = {}) => {
     const normalizedLoc = normalizeLocation(loc) || DEFAULT_WORK_RULE.locationName;
+    if (options.confirm !== false && !confirmSettingSave(`${name} の所属店舗を「${normalizedLoc}」で保存します。`)) return;
     setEmployeeLocation((p) => {
       const next = { ...p, [name]: normalizedLoc };
       try {
@@ -3275,13 +3878,13 @@ export default function App() {
         paidLeaveSettings[name] ?? 0,
         employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
         monthlySalarySettings[name] ?? 0,
-        normalizedLoc
+        buildEmployeeSettingOptions(name, { location: normalizedLoc })
       );
       if (options.notice !== false) showToast(`${name} → ${normalizedLoc} に変更しました ✓`);
     } catch (e) {
       showToast(e.message, "err");
     }
-  }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings]);
+  }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, confirmSettingSave, buildEmployeeSettingOptions]);
   const staffUpdateLocation = useCallback(async (name, loc) => {
     await saveEmployeeLocation(name, loc);
   }, [saveEmployeeLocation]);
@@ -3297,6 +3900,112 @@ export default function App() {
     setExtras((p) => ({ ...p, [name]: list }));
     if (user) dbUpsertPersonExtras(user.id, name, list).catch(() => {});
   }, [user]);
+
+  const saveAllNow = useCallback(async () => {
+    if (!user || saveBusy) return;
+    setSaveBusy(true);
+    try {
+      try {
+        localStorage.setItem(`torikoko:overrides:${user.id}`, JSON.stringify(employeeOverrides));
+        localStorage.setItem(`torikoko:ruleModes:${user.id}`, JSON.stringify(ruleModeByLocation));
+        localStorage.setItem(`torikoko:employeeLoc:${user.id}`, JSON.stringify(employeeLocation));
+        localStorage.setItem(`torikoko:contractStart:${user.id}`, JSON.stringify(contractStartByName));
+        localStorage.setItem(`torikoko:contractEnd:${user.id}`, JSON.stringify(contractEndByName));
+        localStorage.setItem(`torikoko:fareConfig:${user.id}`, JSON.stringify(fareConfig));
+        saveBentoPriceMapToStorage(user.id, bentoPriceByLocation);
+        localStorage.setItem(`torikoko:extras:${user.id}`, JSON.stringify(extras));
+      } catch {
+        // ignore browser storage issues
+      }
+      replaceAttendanceShiftsPeriodInStorage(user.id, allData, year, month);
+      replaceBentoChecksPeriodInStorage(user.id, bentoChecksByName, year, month);
+
+      const namesToSave = Array.from(new Set([
+        ...registeredNames,
+        ...Object.keys(allData || {}),
+        ...Object.keys(fareSettings || {}),
+        ...Object.keys(paidLeaveSettings || {}),
+        ...Object.keys(monthlySalarySettings || {}),
+        ...Object.keys(employmentSettings || {}),
+        ...Object.keys(employeeLocation || {}),
+        ...Object.keys(contractStartByName || {}),
+        ...Object.keys(contractEndByName || {}),
+        ...Object.keys(extras || {}),
+      ])).filter(Boolean);
+
+      const settingsOps = namesToSave.map((name) =>
+        dbUpsertSettings(
+          user.id,
+          name,
+          fareSettings[name] ?? 0,
+          paidLeaveSettings[name] ?? 0,
+          employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
+          monthlySalarySettings[name] ?? 0,
+          buildEmployeeSettingOptions(name, {
+            location: employeeLocation[name] || DEFAULT_WORK_RULE.locationName,
+            contractStart: contractStartByName[name] || "",
+            contractEnd: contractEndByName[name] || "",
+          })
+        )
+      );
+      const extrasOps = namesToSave.map((name) => dbUpsertPersonExtras(user.id, name, extras[name] || []));
+      const ruleOps = Object.values(workRulesByLocation || {}).map((rule) => dbUpsertWorkRule(user.id, {
+        ...rule,
+        ruleMode: normalizeRuleMode(ruleModeByLocation[rule.locationName]),
+      }));
+      const appSettingOps = locationNames.map((locationName) =>
+        dbUpsertAppSettings(user.id, locationName, { bentoPricePerMeal: getBentoPriceForLocation(locationName) })
+      );
+
+      const { start, end } = getPeriodRange(year, month);
+      const attendanceOps = [];
+      Object.entries(allData || {}).forEach(([name, byDate]) => {
+        Object.entries(byDate || {}).forEach(([dateStr, entry]) => {
+          if (dateStr < start || dateStr > end) return;
+          const normalized = normalizeAttendanceEntry(entry || {});
+          if (!normalized.status && !normalized.start && !normalized.end && !normalized.rawStart && !normalized.rawEnd && !normalized.shiftType) return;
+          attendanceOps.push(dbUpsertAttendance(user.id, name, dateStr, normalized));
+        });
+      });
+
+      const bentoOps = [];
+      Object.entries(bentoChecksByName || {}).forEach(([name, byDate]) => {
+        Object.entries(byDate || {}).forEach(([dateStr, value]) => {
+          const unitPrice = getBentoUnitPrice(value, getBentoPriceForName(name));
+          if (unitPrice <= 0) return;
+          if (dateStr < start || dateStr > end) return;
+          bentoOps.push(dbUpsertBentoCheck(user.id, name, dateStr, unitPrice));
+        });
+      });
+
+      const results = await Promise.allSettled([
+        ...settingsOps,
+        ...extrasOps,
+        ...ruleOps,
+        ...appSettingOps,
+        ...attendanceOps,
+        ...bentoOps,
+      ]);
+      const failed = results.filter((r) => r.status === "rejected").length;
+      const stamp = saveStamp();
+      setLastSavedAt(stamp);
+      if (failed > 0) {
+        showToast(`保存は完了しましたが ${failed} 件失敗しました`, "err");
+      } else {
+        showToast(`保存しました ✓ ${stamp}`);
+      }
+    } catch (e) {
+      showToast(`保存エラー: ${e.message}`, "err");
+    } finally {
+      setSaveBusy(false);
+    }
+  }, [
+    user, saveBusy, employeeOverrides, ruleModeByLocation, employeeLocation,
+    contractStartByName, contractEndByName, fareConfig, bentoPriceByLocation, extras,
+    allData, year, month, registeredNames, fareSettings, paidLeaveSettings,
+    monthlySalarySettings, employmentSettings, workRulesByLocation, bentoChecksByName,
+    buildEmployeeSettingOptions, locationNames, getBentoPriceForLocation, getBentoPriceForName
+  ]);
 
   const retireStaff = async (name) => {
     const today = getLocalToday();
@@ -3320,21 +4029,21 @@ export default function App() {
   const staffUpdateFare = useCallback(async (name, val) => {
     if (!user) return;
     setFareSettings((p) => ({ ...p, [name]: val }));
-    try { await dbUpsertSettings(user.id, name, val, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0); }
+    try { await dbUpsertSettings(user.id, name, val, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0, buildEmployeeSettingOptions(name)); }
     catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
-  }, [user, paidLeaveSettings, employmentSettings, monthlySalarySettings]);
+  }, [user, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
   const staffUpdatePaid = useCallback(async (name, val) => {
     if (!user) return;
     setPaidLeaveSettings((p) => ({ ...p, [name]: val }));
-    try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, val, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0); }
+    try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, val, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0, buildEmployeeSettingOptions(name)); }
     catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
-  }, [user, fareSettings, employmentSettings, monthlySalarySettings]);
+  }, [user, fareSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
   const staffUpdateMonthly = useCallback(async (name, val) => {
     if (!user) return;
     setMonthlySalarySettings((p) => ({ ...p, [name]: val }));
-    try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, val); }
+    try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, val, buildEmployeeSettingOptions(name)); }
     catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
-  }, [user, fareSettings, paidLeaveSettings, employmentSettings]);
+  }, [user, fareSettings, paidLeaveSettings, employmentSettings, buildEmployeeSettingOptions]);
   const onFile = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
@@ -3365,7 +4074,25 @@ export default function App() {
       Object.keys(byName).forEach((n) => {
         const fromCSV = matchStoreFromCSVLocation(locationByName[n], locationNames);
         const fromSaved = normalizeLocation(employeeLocation[n]);
-        nameLocations[n] = fromCSV || (fromSaved && locationNames.includes(fromSaved) ? fromSaved : null) || activeLocation;
+
+        // 基本の判定
+        let detectedLoc = fromCSV || (fromSaved && locationNames.includes(fromSaved) ? fromSaved : null) || activeLocation;
+
+        // 個別ルール
+        if (byName[n] && byName[n].length > 0) {
+          const firstDateStr = byName[n][0].dateStr;
+          const dateObj = new Date(firstDateStr);
+          const dayOfWeek = dateObj.getDay();
+          const isHoliday = !!HOLIDAYS[firstDateStr];
+
+          if (n === "吉田健志") {
+            detectedLoc = (dayOfWeek === 3) ? "Lien" : "Ties";
+          }
+          else if (n === "古山美菜子") {
+            detectedLoc = (isHoliday || dayOfWeek === 6) ? "Ties" : "Lien";
+          }
+        }
+        nameLocations[n] = detectedLoc;
       });
       setPreview({ byName, selKeys: allKeys, nameLocations, csvLocations: locationByName, parseMeta: best });
       const delimLabel = best?.delimiter === "\t" ? "TAB" : (best?.delimiter || ",");
@@ -3392,10 +4119,15 @@ export default function App() {
         const resolvedLocByName = {};
         importedNames.forEach((rawName) => {
           const resolvedName = existingNameMap.get(normalizePersonName(rawName)) || rawName;
+          const resolvedLocation =
+            detectLocationFromFacility(locationByName?.[rawName], locationNames)
+            || normalizeLocation(employeeLocation[resolvedName])
+            || activeLocation;
+          const resolvedPrice = Math.max(0, Number(pricePerMeal) || getBentoPriceForLocation(resolvedLocation));
           const periodFiltered = {};
           Object.entries(byName[rawName] || {}).forEach(([dateStr, checked]) => {
             if (!checked) return;
-            if (dateStr >= periodStart && dateStr <= periodEnd) periodFiltered[dateStr] = true;
+            if (dateStr >= periodStart && dateStr <= periodEnd) periodFiltered[dateStr] = resolvedPrice;
           });
           if (!Object.keys(periodFiltered).length) return;
           resolvedByName[resolvedName] = { ...(resolvedByName[resolvedName] || {}), ...periodFiltered };
@@ -3420,13 +4152,18 @@ export default function App() {
             });
           });
           mergedBentoChecks = next;
-          if (bentoStorageOnly) replaceBentoChecksPeriodInStorage(user?.id, next, year, month);
+          replaceBentoChecksPeriodInStorage(user?.id, next, year, month);
           return next;
         });
 
         if (importOps.length) {
           const results = await Promise.allSettled(
-            importOps.map(({ name, dateStr }) => dbUpsertBentoCheck(user?.id, name, dateStr))
+            importOps.map(({ name, dateStr }) => dbUpsertBentoCheck(
+              user?.id,
+              name,
+              dateStr,
+              resolvedByName?.[name]?.[dateStr] || getBentoPriceForName(name)
+            ))
           );
           const hasMissingTable = results.some((r) => r.status === "rejected" && isMissingRelationErr(r.reason, "bento_checks"));
           if (hasMissingTable) {
@@ -3439,7 +4176,25 @@ export default function App() {
           }
         }
 
-        if (pricePerMeal > 0) setBentoPricePerMeal(pricePerMeal);
+        if (pricePerMeal > 0) {
+          const targetLocations = Array.from(new Set(
+            targetNames.map((name) =>
+              detectLocationFromFacility(resolvedLocByName[name], locationNames)
+              || normalizeLocation(employeeLocation[name])
+              || activeLocation
+            ).filter(Boolean)
+          ));
+          setBentoPriceByLocation((prev) => {
+            const next = { ...prev };
+            targetLocations.forEach((locationName) => { next[locationName] = pricePerMeal; });
+            return next;
+          });
+          if (user?.id) {
+            Promise.allSettled(
+              targetLocations.map((locationName) => dbUpsertAppSettings(user.id, locationName, { bentoPricePerMeal: pricePerMeal }))
+            ).catch(() => {});
+          }
+        }
 
         const total = targetNames.reduce((s, n) => s + Object.keys(resolvedByName[n] || {}).length, 0);
         const sheetLabel = usedSheets?.length > 1 ? `シート${usedSheets.length}枚` : `シート「${usedSheet}」`;
@@ -3469,21 +4224,24 @@ export default function App() {
   }));
 
   const handleToggleBento = useCallback(async (targetName, dateStr) => {
-    const nextChecked = !bentoChecksByName?.[targetName]?.[dateStr];
+    const fallbackPrice = getBentoPriceForName(targetName);
+    const existingPrice = getBentoUnitPrice(bentoChecksByName?.[targetName]?.[dateStr], fallbackPrice);
+    const nextChecked = existingPrice <= 0;
+    const nextPrice = nextChecked ? Math.max(0, Number(fallbackPrice) || 0) : 0;
     let nextBentoChecks = {};
     setBentoChecksByName((prev) => {
       const next = { ...prev };
       const byDate = { ...(next[targetName] || {}) };
       if (byDate[dateStr]) delete byDate[dateStr];
-      else byDate[dateStr] = true;
+      else byDate[dateStr] = nextPrice;
       if (Object.keys(byDate).length) next[targetName] = byDate;
       else delete next[targetName];
       nextBentoChecks = next;
-      if (bentoStorageOnly) replaceBentoChecksPeriodInStorage(user?.id, next, year, month);
+      replaceBentoChecksPeriodInStorage(user?.id, next, year, month);
       return next;
     });
     try {
-      if (nextChecked) await dbUpsertBentoCheck(user?.id, targetName, dateStr);
+      if (nextChecked) await dbUpsertBentoCheck(user?.id, targetName, dateStr, nextPrice);
       else await dbDeleteBentoCheck(user?.id, targetName, dateStr);
     } catch (e) {
       if (isMissingRelationErr(e, "bento_checks")) {
@@ -3493,7 +4251,7 @@ export default function App() {
         showToast(`お弁当保存エラー: ${e.message}`, "err");
       }
     }
-  }, [bentoChecksByName, user, bentoStorageOnly, year, month]);
+  }, [bentoChecksByName, getBentoPriceForName, user, year, month]);
 
   const confirmImport = async () => {
     if (!preview || !user) return;
@@ -3524,7 +4282,7 @@ export default function App() {
             paidLeaveSettings[name] ?? 0,
             employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
             isNewStaff ? 0 : (monthlySalarySettings[name] ?? 0),
-            assignedLoc
+            buildEmployeeSettingOptions(name, { location: assignedLoc })
           ),
         });
         if (isNewStaff) {
@@ -3544,6 +4302,7 @@ export default function App() {
             !existing.modified &&
             !existing.rawStart &&
             !existing.rawEnd &&
+            !existing.shiftType &&
             (existing.status === "出勤" || existing.start || existing.end);
 
           if (shouldClearAutoAttendance) {
@@ -3559,14 +4318,18 @@ export default function App() {
           }
 
           const nextStatus = existing.status || (hasActualTime ? "出勤" : "");
+          const nextShiftType = normalizeShiftType(existing.shiftType) || guessTorikokoShiftType(assignedLoc, row);
+          const effectiveRule = applyEntryShiftRule(rule, { ...row, shiftType: nextShiftType });
           const merged = {
             ...existing,
             status: nextStatus,
-            start:    hasActualTime ? (snapStart(row.rawStart || row.roundedStart, rule) || "") : "",
+            shiftType: nextShiftType,
+            start:    hasActualTime ? (snapStart(row.rawStart || row.roundedStart, effectiveRule) || "") : "",
             end:      hasActualTime ? (row.roundedEnd || "") : "",
             rawStart: row.rawStart || "", rawEnd: row.rawEnd || "",
           };
-          const isEmpty = !merged.status && !merged.start && !merged.end && !merged.rawStart && !merged.rawEnd;
+          if (!merged.shiftType) delete merged.shiftType;
+          const isEmpty = !merged.status && !merged.start && !merged.end && !merged.rawStart && !merged.rawEnd && !merged.shiftType;
           if (isEmpty) continue;
           next[name][row.dateStr] = merged;
           operations.push({
@@ -3634,7 +4397,7 @@ export default function App() {
     setEmployeeLocation((p) => ({ ...p, [n]: p[n] || assignLoc }));
     setRegisteredNames((p) => (p.includes(n) ? p : [...p, n].sort((a, b) => a.localeCompare(b, "ja"))));
     setActiveName(n);
-    try { await dbUpsertSettings(user.id, n, 0, 0, DEFAULT_EMPLOYMENT_TYPE, 0, assignLoc); }
+    try { await dbUpsertSettings(user.id, n, 0, 0, DEFAULT_EMPLOYMENT_TYPE, 0, buildEmployeeSettingOptions(n, { location: assignLoc })); }
     catch (e) { showToast(`追加エラー: ${e.message}`, "err"); }
   };
 
@@ -3647,14 +4410,20 @@ export default function App() {
       setBentoChecksByName((p) => {
         const n = { ...p };
         delete n[name];
-        if (bentoStorageOnly) saveBentoChecksToStorage(user?.id, n);
+        replaceBentoChecksPeriodInStorage(user?.id, n, year, month);
         return n;
       });
       setFareSettings((p) => { const n = { ...p }; delete n[name]; return n; });
       setPaidLeaveSettings((p) => { const n = { ...p }; delete n[name]; return n; });
       setEmploymentSettings((p) => { const n = { ...p }; delete n[name]; return n; });
+      setMonthlySalarySettings((p) => { const n = { ...p }; delete n[name]; return n; });
       setEmployeeOverrides((p) => { const n = { ...p }; delete n[name]; return n; });
+      setContractStartByName((p) => { const n = { ...p }; delete n[name]; return n; });
+      setContractEndByName((p) => { const n = { ...p }; delete n[name]; return n; });
+      setFareConfig((p) => { const n = { ...p }; delete n[name]; return n; });
+      setExtras((p) => { const n = { ...p }; delete n[name]; return n; });
       setEmployeeLocation((p) => { const n = { ...p }; delete n[name]; return n; });
+      setRetiredSettings((p) => { const n = { ...p }; delete n[name]; return n; });
       setRegisteredNames((p) => p.filter((n) => n !== name));
       setActiveName((prev) => prev === name ? (names.find((x) => x !== name) || "") : prev);
       showToast(`「${name}」を削除しました`);
@@ -3674,7 +4443,7 @@ export default function App() {
       .map(({ key: dateStr, dow }) => {
         const entry = normalizeAttendanceEntry(entries[dateStr] || {});
         const { effectiveStart, effectiveEnd } = resolveEntryTimes(entry, rule);
-        const calc = effectiveStart && effectiveEnd ? calcWork(dateStr, effectiveStart, effectiveEnd, rule, empType) : null;
+        const calc = effectiveStart && effectiveEnd ? calcWork(dateStr, effectiveStart, effectiveEnd, rule, empType, entry) : null;
         const actualMin = entry.rawStart && entry.rawEnd ? calcActualWork(entry.rawStart, entry.rawEnd, rule, empType) : null;
         return { name, dateStr, weekday: WD[dow], status: entry.status || "",
           rawStart: entry.rawStart || "", roundedStart: effectiveStart || "",
@@ -3739,9 +4508,9 @@ export default function App() {
         }
 
         const bentoByDate = bentoChecksByName[name] || {};
-        const bentoCount  = Object.entries(bentoByDate)
-          .filter(([d, v]) => v && (!retiredAt || d <= retiredAt)).length;
-        const bentoTotal  = bentoCount * bentoPricePerMeal;
+        const bentoPricePerMeal = getBentoPriceForName(name);
+        const bentoCount  = countBentoEntries(bentoByDate, (dateStr) => !retiredAt || dateStr <= retiredAt);
+        const bentoTotal  = sumBentoEntries(bentoByDate, bentoPricePerMeal, (dateStr) => !retiredAt || dateStr <= retiredAt);
 
         const detailRows = days.map(({ key: dateStr, mo, d, dow }) => ({
           dateLabel: `${mo}/${d}`,
@@ -3814,10 +4583,30 @@ export default function App() {
       ).join("");
       return `<section class="sheet"><h2>${esc(name)} / ${esc(year)}年${esc(month)}月${retiredNote}</h2><table><thead><tr><th>日付</th><th>曜</th><th>勤怠</th><th>開始(実)</th><th>開始(丸)</th><th>終了(実)</th><th>終了(丸)</th><th>勤務(丸)</th><th>日給</th></tr></thead><tbody>${rows}</tbody></table></section>`;
     });
-    const w = window.open("","_blank","width=1200,height=900");
-    if (!w) { showToast("ポップアップを許可してください","err"); return; }
-    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(target.title)}</title><style>body{font-family:"Hiragino Kaku Gothic ProN",sans-serif;margin:20px}h2{font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #999;padding:4px 6px;text-align:center}th{background:#f3f4f6}.sheet{page-break-after:always}.sheet:last-child{page-break-after:auto}</style></head><body>${sections.join("")}</body></html>`);
-    w.document.close(); setTimeout(() => w.print(), 200);
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "fixed";
+    iframe.style.right = "0";
+    iframe.style.bottom = "0";
+    iframe.style.width = "0";
+    iframe.style.height = "0";
+    iframe.style.border = "0";
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow?.document;
+    if (!doc || !iframe.contentWindow) {
+      document.body.removeChild(iframe);
+      showToast("印刷画面の準備に失敗しました", "err");
+      return;
+    }
+    doc.open();
+    doc.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(target.title)}</title><style>body{font-family:"Hiragino Kaku Gothic ProN",sans-serif;margin:20px}h2{font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #999;padding:4px 6px;text-align:center}th{background:#f3f4f6}.sheet{page-break-after:always}.sheet:last-child{page-break-after:auto}</style></head><body>${sections.join("")}</body></html>`);
+    doc.close();
+    setTimeout(() => {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+      setTimeout(() => {
+        if (document.body.contains(iframe)) document.body.removeChild(iframe);
+      }, 1000);
+    }, 200);
   };
 
   if (!user) return <Login onLoggedIn={setUser} />;
@@ -3915,7 +4704,11 @@ export default function App() {
                   {rows.map((row) => {
                     const k = name + "|" + row.dateStr;
                     const rule = getEffectiveRuleAtLocation(name, assignedLoc);
-                    const snapped = snapStart(row.rawStart || row.roundedStart, rule);
+                    const previewShiftType = guessTorikokoShiftType(assignedLoc, row);
+                    const snapped = snapStart(
+                      row.rawStart || row.roundedStart,
+                      applyEntryShiftRule(rule, { ...row, shiftType: previewShiftType })
+                    );
                     const didSnap = row.rawStart && snapped !== row.rawStart;
                     return (
                       <label key={k} style={{ display: "flex", alignItems: "center", padding: "5px 10px", borderBottom: "1px solid #f5f0e8", cursor: "pointer", fontSize: 12, gap: 6, flexWrap: "wrap" }}>
@@ -4021,6 +4814,25 @@ export default function App() {
               <option value="store">店舗別</option>
               <option value="name">個人別</option>
             </select>
+            <button
+              onClick={saveAllNow}
+              disabled={saveBusy || loading}
+              style={{
+                ...S.csvBtn,
+                background: saveBusy ? "#166534" : "#22c55e",
+                borderColor: saveBusy ? "#14532d" : "#16a34a",
+                color: "#fff",
+                opacity: saveBusy || loading ? 0.8 : 1,
+                fontWeight: 900,
+              }}
+            >
+              {saveBusy ? "保存中…" : "💾 設定を保存"}
+            </button>
+            {lastSavedAt && (
+              <span style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap" }}>
+                保存済み {lastSavedAt}
+              </span>
+            )}
             <button style={S.csvBtn} onClick={downloadCSV}>⬇ CSV</button>
             <button style={S.csvBtn} onClick={printSheet}>🖨 印刷</button>
             <div style={{ width: 1, height: 24, background: "rgba(255,255,255,0.15)", margin: "0 2px" }} />
@@ -4100,7 +4912,7 @@ export default function App() {
                 onClick={removeLocation} disabled={locationNames.length <= 1}>削除</button>
               <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color: "#374151", marginLeft: 4 }}>
                 個別ルール：
-                <select value={activeRuleMode} onChange={(e) => setRuleModeByLocation((p) => ({ ...p, [activeLocation]: e.target.value }))}
+                <select value={activeRuleMode} onChange={(e) => updateRuleMode(activeLocation, e.target.value)}
                   style={{ border: "1px solid #d6cec1", borderRadius: 6, padding: "3px 6px", fontSize: 11, background: "#fff" }}>
                   <option value={RULE_MODE_STORE}>店舗共通</option>
                   <option value={RULE_MODE_INDIVIDUAL}>個別対応</option>
@@ -4236,7 +5048,7 @@ export default function App() {
                 }}>
                   <span>{employeeOverrides[activeName]?.enabled ? `${activeName}さんの個別設定` : `${activeName}さんの詳細設定`}</span>
                   <span style={{ fontSize: 11, fontWeight: 700, color: employeeOverrides[activeName]?.enabled ? "#6366f1" : "#6b7280" }}>
-                    {employeeOverrides[activeName]?.enabled ? "朝設定のみ個別" : "店舗共通設定"}
+                    {employeeOverrides[activeName]?.enabled ? "始め/終了を個別設定" : "店舗共通設定"}
                   </span>
                 </summary>
                 <div style={{ marginTop: 10, display: "grid", gap: 12, background: "#f8fafc", border: "1px solid #dbeafe", borderRadius: 12, padding: 12 }}>
@@ -4298,7 +5110,7 @@ export default function App() {
                       </select>
                     </label>
                   </div>
-                  <div style={{ fontSize: 11, color: "#64748b" }}>個別設定では始め設定と終了設定の丸めを変更できます。</div>
+                  <div style={{ fontSize: 11, color: "#64748b" }}>始め設定は30分以内の早着だけ丸めます。終了設定はその時刻以降をその時刻に丸めます。</div>
                 </div>
               </details>
             </div>
@@ -4359,7 +5171,7 @@ export default function App() {
             employmentSettings={employmentSettings}
             getEffectiveRule={getEffectiveRule}
             bentoChecksByName={bentoChecksByName}
-            bentoPricePerMeal={bentoPricePerMeal}
+            getBentoPriceForName={getBentoPriceForName}
             prevAllData={prevAllData}
             monthlySalarySettings={monthlySalarySettings}
             retiredSettings={retiredSettings}
@@ -4376,7 +5188,7 @@ export default function App() {
             workRule={activeEffectiveRule}
             employmentType={activeEmploymentType}
             bentoByDate={bentoChecksByName[activeName] || {}}
-            bentoPricePerMeal={bentoPricePerMeal}
+            bentoPricePerMeal={activeBentoPricePerMeal}
             monthlySalary={monthlySalarySettings[activeName] ?? 0}
             retiredAt={retiredSettings[activeName]?.isRetired ? retiredSettings[activeName]?.retiredAt : null}
             fareConfig={fareConfig}
