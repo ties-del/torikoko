@@ -4085,6 +4085,8 @@ export default function App() {
           const dayOfWeek = dateObj.getDay();
           const isHoliday = !!HOLIDAYS[firstDateStr];
 
+          console.log("[店舗振り分け]", JSON.stringify(n), "firstDate:", firstDateStr, "dayOfWeek:", dayOfWeek);
+
           if (n === "吉田健志") {
             detectedLoc = (dayOfWeek === 3) ? "Lien" : "Ties";
           }
