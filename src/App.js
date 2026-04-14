@@ -912,6 +912,41 @@ function getCsvRoundedEnd(endStr, employmentType, locationName = "", workRule = 
   return endMin > capMin ? m2t(capMin) || endStr : endStr;
 }
 
+function applyNamedPreviewLocationCorrections(preview) {
+  const byName = preview?.byName || {};
+  const nextNameLocations = { ...(preview?.nameLocations || {}) };
+  const nextRowLocations = Object.fromEntries(
+    Object.entries(preview?.rowLocations || {}).filter(([key]) => !key.startsWith("吉田健志|") && !key.startsWith("古山美菜子|"))
+  );
+  const appliedNames = [];
+
+  const yoshidaRows = byName["吉田健志"] || [];
+  if (yoshidaRows.length) {
+    nextNameLocations["吉田健志"] = "Ties";
+    appliedNames.push("吉田健志");
+    yoshidaRows.forEach((row) => {
+      const dow = new Date(`${row.dateStr}T00:00:00`).getDay();
+      if (dow === 3) nextRowLocations[`吉田健志|${row.dateStr}`] = "Lien";
+    });
+  }
+
+  const furuyamaRows = byName["古山美菜子"] || [];
+  if (furuyamaRows.length) {
+    nextNameLocations["古山美菜子"] = "Lien";
+    appliedNames.push("古山美菜子");
+    furuyamaRows.forEach((row) => {
+      const dow = new Date(`${row.dateStr}T00:00:00`).getDay();
+      if (dow === 6 || !!HOLIDAYS[row.dateStr]) nextRowLocations[`古山美菜子|${row.dateStr}`] = "Ties";
+    });
+  }
+
+  return {
+    nameLocations: nextNameLocations,
+    rowLocations: nextRowLocations,
+    appliedNames,
+  };
+}
+
 function getCsvDailyExportRow(entry, dateStr, workRule = DEFAULT_WORK_RULE, employmentType = DEFAULT_EMPLOYMENT_TYPE, locationName = "") {
   const normalized = normalizeAttendanceEntry(entry || {});
   const effectiveRule = applyEntryShiftRule(workRule, normalized);
@@ -2252,13 +2287,16 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
   onAdd, onRemove, onUpdateLocation, onUpdateEmployment, onUpdateFare,
   onUpdatePaid, onUpdateMonthly, onSave, onRetire, onSelectStaff,
   contractStartByName, contractEndByName, employeeOverrides,
-  onUpdateContractStart, onUpdateContractEnd, onUpdateEmployeeOverride, onResetEmployeeOverride }) {
+  onUpdateContractStart, onUpdateContractEnd, onUpdateEmployeeOverride, onResetEmployeeOverride,
+  workRulesByLocation, onUpdateBreakOverride, onResetBreakOverride }) {
 
   const [editingName, setEditingName] = useState(null); // 編集中の行
   const [addOpen, setAddOpen]         = useState(false);
   const [newName, setNewName]         = useState("");
   const [newLoc, setNewLoc]           = useState(locationNames[0] || "");
   const [filterLoc, setFilterLoc]     = useState(activeLocation || "all");
+  // 休憩閾値（時間）は小数入力中に文字列で保持する
+  const [breakHoursDraft, setBreakHoursDraft] = useState({});
   const defaultLocation = locationNames.includes(DEFAULT_WORK_RULE.locationName)
     ? DEFAULT_WORK_RULE.locationName
     : (locationNames[0] || DEFAULT_WORK_RULE.locationName);
@@ -2341,7 +2379,7 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ background: "#1a2e1a" }}>
-              {["番号", "氏名", "所属店舗", "雇用区分", "月給 / 時給", "交通費", "有給単価", ""].map((h, i) => (
+              {["番号", "氏名", "所属店舗", "雇用区分", "給料金額", "交通費", "給料単価", ""].map((h, i) => (
                 <th key={i} style={{ padding: "11px 14px", textAlign: i > 2 ? "right" : "left", fontSize: 11, fontWeight: 800, color: "#8db08d", whiteSpace: "nowrap" }}>{h}</th>
               ))}
             </tr>
@@ -2358,6 +2396,16 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
               const contractStart = contractStartByName[name] || "";
               const contractEnd = contractEndByName[name] || "";
               const contractSummary = `始め設定 ${contractStart || "未設定"} / 終了設定 ${contractEnd || "未設定"}`;
+
+              const hasBreakOverride = !!employeeOverrides[name]?.breakRule;
+              const breakRule = employeeOverrides[name]?.breakRule || {};
+              const baseLocRule = sanitizeRule(workRulesByLocation?.[loc] || {});
+              const ftHDisplay = breakHoursDraft[name]?.ftH ?? (hasBreakOverride
+                ? String(breakRule.breakThresholdMinutesFullTime / 60)
+                : String(baseLocRule.breakThresholdMinutesFullTime / 60));
+              const ptHDisplay = breakHoursDraft[name]?.ptH ?? (hasBreakOverride
+                ? String(breakRule.breakThresholdMinutesPartTime / 60)
+                : String(baseLocRule.breakThresholdMinutesPartTime / 60));
 
               return (
                 <Fragment key={name}>
@@ -2405,27 +2453,23 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
                       )}
                     </td>
 
-                    {/* 月給（正社員のみ） */}
+                    {/* 給料金額 */}
                     <td style={{ padding: "12px 14px", textAlign: "right" }}>
-                      {isFullTime ? (
-                        isEditing ? (
-                          <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
-                            <span style={{ fontSize: 12, color: "#6b7280" }}>¥</span>
-                            <input type="number" min={0} step={1000}
-                              value={monthlySalarySettings[name] ?? 0}
-                              onChange={(e) => onUpdateMonthly(name, +e.target.value)}
-                              style={{ width: 100, border: "2px solid #bfdbfe", borderRadius: 8, padding: "5px 8px", fontSize: 13, fontWeight: 700, textAlign: "right", outline: "none" }} />
-                            <span style={{ fontSize: 11, color: "#6b7280" }}>/月</span>
-                          </div>
-                        ) : (
-                          <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, color: "#1a2e1a", fontSize: 13 }}>
-                            {(monthlySalarySettings[name] ?? 0) > 0
-                              ? <>{`¥${(monthlySalarySettings[name]).toLocaleString()}`}<span style={{ fontSize: 10, color: "#6b7280", marginLeft: 3 }}>/月</span></>
-                              : <span style={{ color: "#ccc" }}>未設定</span>}
-                          </span>
-                        )
+                      {isEditing ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
+                          <span style={{ fontSize: 12, color: "#6b7280" }}>¥</span>
+                          <input type="number" min={0} step={1000}
+                            value={monthlySalarySettings[name] ?? 0}
+                            onChange={(e) => onUpdateMonthly(name, +e.target.value)}
+                            style={{ width: 100, border: "2px solid #bfdbfe", borderRadius: 8, padding: "5px 8px", fontSize: 13, fontWeight: 700, textAlign: "right", outline: "none" }} />
+                          <span style={{ fontSize: 11, color: "#6b7280" }}>/月</span>
+                        </div>
                       ) : (
-                        <span style={{ color: "#9ca3af", fontSize: 11, background: "#f3f4f6", borderRadius: 6, padding: "3px 8px" }}>時給制</span>
+                        <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, color: "#1a2e1a", fontSize: 13 }}>
+                          {(monthlySalarySettings[name] ?? 0) > 0
+                            ? <>{`¥${(monthlySalarySettings[name]).toLocaleString()}`}<span style={{ fontSize: 10, color: "#6b7280", marginLeft: 3 }}>/月</span></>
+                            : <span style={{ color: "#ccc" }}>未設定</span>}
+                        </span>
                       )}
                     </td>
 
@@ -2445,7 +2489,7 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
                       )}
                     </td>
 
-                    {/* 有給単価 */}
+                    {/* 給料単価 */}
                     <td style={{ padding: "12px 14px", textAlign: "right" }}>
                       {isEditing ? (
                         <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
@@ -2465,7 +2509,16 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
                     <td style={{ padding: "12px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
                       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                         <button onClick={() => {
-                            if (isEditing && onSave) onSave(name);
+                            if (isEditing) {
+                              if (onSave) onSave(name);
+                              // breakHoursDraft に残っている閾値を確定保存
+                              const hd = breakHoursDraft[name];
+                              if (hd && hasBreakOverride) {
+                                if (hd.ftH !== undefined) onUpdateBreakOverride(name, { breakThresholdMinutesFullTime_h: Number(hd.ftH) || 0 });
+                                if (hd.ptH !== undefined) onUpdateBreakOverride(name, { breakThresholdMinutesPartTime_h: Number(hd.ptH) || 0 });
+                              }
+                              setBreakHoursDraft((prev) => { const n = { ...prev }; delete n[name]; return n; });
+                            }
                             setEditingName(isEditing ? null : name);
                           }}
                           style={{ border: isEditing ? "2px solid #166534" : "1px solid #d1fae5", background: isEditing ? "#166534" : "#f0fdf4", color: isEditing ? "#fff" : "#166534",
@@ -2530,6 +2583,83 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
                             </label>
                           </div>
                           <div style={{ fontSize: 11, color: "#64748b" }}>始め設定は30分以内の早着だけ丸めます。終了設定はその時刻以降をその時刻に丸めます。</div>
+
+                          {/* ── 個別休憩設定 ── */}
+                          <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: 10, display: "grid", gap: 8 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 12, fontWeight: 800, color: "#334155" }}>☕ 休憩設定（個別）</span>
+                              <select
+                                value={hasBreakOverride ? "individual" : "shared"}
+                                onChange={(e) => {
+                                  if (e.target.value === "individual") {
+                                    onUpdateBreakOverride(name, {
+                                      breakMinutesFullTime: baseLocRule.breakMinutesFullTime,
+                                      breakThresholdMinutesFullTime: baseLocRule.breakThresholdMinutesFullTime,
+                                      breakMinutesPartTime: baseLocRule.breakMinutesPartTime,
+                                      breakThresholdMinutesPartTime: baseLocRule.breakThresholdMinutesPartTime,
+                                    });
+                                    setBreakHoursDraft((prev) => ({
+                                      ...prev,
+                                      [name]: {
+                                        ftH: String(baseLocRule.breakThresholdMinutesFullTime / 60),
+                                        ptH: String(baseLocRule.breakThresholdMinutesPartTime / 60),
+                                      },
+                                    }));
+                                  } else {
+                                    onResetBreakOverride(name);
+                                    setBreakHoursDraft((prev) => { const n = { ...prev }; delete n[name]; return n; });
+                                  }
+                                }}
+                                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 8px", fontSize: 12, background: "#fff", outline: "none", cursor: "pointer" }}
+                              >
+                                <option value="shared">店舗共通</option>
+                                <option value="individual">個別設定</option>
+                              </select>
+                            </div>
+                            {hasBreakOverride && (
+                              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                                {/* 正社員 */}
+                                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                  <span style={{ fontSize: 11, fontWeight: 700, color: "#475569" }}>正社員</span>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                    <input type="number" min={0} max={120}
+                                      value={breakRule.breakMinutesFullTime ?? baseLocRule.breakMinutesFullTime}
+                                      onChange={(e) => onUpdateBreakOverride(name, { breakMinutesFullTime: Math.max(0, Number(e.target.value) || 0) })}
+                                      style={{ width: 52, border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 6px", fontSize: 12, textAlign: "right", outline: "none" }} />
+                                    <span style={{ fontSize: 11, color: "#64748b" }}>分休憩 /</span>
+                                    <input type="number" min={0} max={24} step={0.5}
+                                      value={ftHDisplay}
+                                      onChange={(e) => setBreakHoursDraft((prev) => ({ ...prev, [name]: { ...(prev[name] || {}), ftH: e.target.value } }))}
+                                      onBlur={() => onUpdateBreakOverride(name, { breakThresholdMinutesFullTime_h: Number(ftHDisplay) || 0 })}
+                                      style={{ width: 52, border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 6px", fontSize: 12, textAlign: "right", outline: "none" }} />
+                                    <span style={{ fontSize: 11, color: "#64748b" }}>時間以上</span>
+                                  </div>
+                                </div>
+                                {/* パート */}
+                                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                  <span style={{ fontSize: 11, fontWeight: 700, color: "#475569" }}>パート</span>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                    <input type="number" min={0} max={120}
+                                      value={breakRule.breakMinutesPartTime ?? baseLocRule.breakMinutesPartTime}
+                                      onChange={(e) => onUpdateBreakOverride(name, { breakMinutesPartTime: Math.max(0, Number(e.target.value) || 0) })}
+                                      style={{ width: 52, border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 6px", fontSize: 12, textAlign: "right", outline: "none" }} />
+                                    <span style={{ fontSize: 11, color: "#64748b" }}>分休憩 /</span>
+                                    <input type="number" min={0} max={24} step={0.5}
+                                      value={ptHDisplay}
+                                      onChange={(e) => setBreakHoursDraft((prev) => ({ ...prev, [name]: { ...(prev[name] || {}), ptH: e.target.value } }))}
+                                      onBlur={() => onUpdateBreakOverride(name, { breakThresholdMinutesPartTime_h: Number(ptHDisplay) || 0 })}
+                                      style={{ width: 52, border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 6px", fontSize: 12, textAlign: "right", outline: "none" }} />
+                                    <span style={{ fontSize: 11, color: "#64748b" }}>時間以上</span>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            {!hasBreakOverride && (
+                              <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                                店舗設定を使用中：正社員 {baseLocRule.breakMinutesFullTime}分 / {baseLocRule.breakThresholdMinutesFullTime / 60}時間以上、パート {baseLocRule.breakMinutesPartTime}分 / {baseLocRule.breakThresholdMinutesPartTime / 60}時間以上
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </td>
                     </tr>
@@ -3337,7 +3467,15 @@ export default function App() {
     const hinted = normalizeLocation(locationHint);
     const loc = hinted && workRulesByLocation[hinted] ? hinted : getLocationForName(name);
     const base = sanitizeRule(workRulesByLocation[loc] || { ...DEFAULT_WORK_RULE, locationName: loc });
-    let rule = base;
+    const override = employeeOverrides[name];
+    let rule = override?.enabled && override?.rule
+      ? sanitizeRule({ ...base, ...override.rule, locationName: base.locationName })
+      : base;
+
+    // 個別休憩設定（enabled状態に関わらず独立して適用）
+    if (override?.breakRule) {
+      rule = sanitizeRule({ ...rule, ...override.breakRule, locationName: base.locationName });
+    }
 
     // 始め設定・終了設定の丸めは設定モードに関わらず個別指定できる。
     const contractStart = contractStartByName[name];
@@ -3360,7 +3498,7 @@ export default function App() {
     }
 
     return rule;
-  }, [getLocationForName, workRulesByLocation, contractStartByName, contractEndByName]);
+  }, [getLocationForName, workRulesByLocation, contractStartByName, contractEndByName, employeeOverrides]);
   const getEffectiveRule = useCallback((name) => {
     return getEffectiveRuleAtLocation(name, getLocationForName(name));
   }, [getEffectiveRuleAtLocation, getLocationForName]);
@@ -3460,6 +3598,61 @@ export default function App() {
       showToast(`保存エラー: ${e.message}`, "err");
     }
   }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
+
+  const updateBreakOverride = useCallback(async (name, patch) => {
+    let nextOverride = null;
+    setEmployeeOverrides((prev) => {
+      const current = prev[name] || {};
+      const converted = { ...patch };
+      if ("breakThresholdMinutesFullTime_h" in patch)
+        converted.breakThresholdMinutesFullTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesFullTime_h) || 0) * 60));
+      if ("breakThresholdMinutesPartTime_h" in patch)
+        converted.breakThresholdMinutesPartTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesPartTime_h) || 0) * 60));
+      delete converted.breakThresholdMinutesFullTime_h;
+      delete converted.breakThresholdMinutesPartTime_h;
+      nextOverride = { ...current, breakRule: { ...(current.breakRule || {}), ...converted } };
+      return { ...prev, [name]: nextOverride };
+    });
+    if (!user) return;
+    try {
+      await dbUpsertSettings(
+        user.id, name,
+        fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0,
+        employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
+        monthlySalarySettings[name] ?? 0,
+        buildEmployeeSettingOptions(name, { overrideRule: nextOverride })
+      );
+    } catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
+  }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
+
+  const resetBreakOverride = useCallback(async (name) => {
+    let nextOverrideForSave = null;
+    setEmployeeOverrides((prev) => {
+      const current = prev[name];
+      if (!current) return prev;
+      const next = { ...current };
+      delete next.breakRule;
+      if (!next.enabled && !next.rule) {
+        nextOverrideForSave = null;
+        const updated = { ...prev };
+        delete updated[name];
+        return updated;
+      }
+      nextOverrideForSave = next;
+      return { ...prev, [name]: next };
+    });
+    if (!user) return;
+    try {
+      await dbUpsertSettings(
+        user.id, name,
+        fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0,
+        employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE,
+        monthlySalarySettings[name] ?? 0,
+        buildEmployeeSettingOptions(name, { overrideRule: nextOverrideForSave })
+      );
+    } catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
+  }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
+
   const confirmSettingSave = useCallback((message) => window.confirm(`${message}\n保存しますか？`), []);
   const saveContractSettings = useCallback(async (name, patch = {}) => {
     if (!user) return;
@@ -4130,23 +4323,18 @@ export default function App() {
       Object.keys(byName).forEach((n) => {
         const fromCSV = matchStoreFromCSVLocation(locationByName[n], locationNames);
         const fromSaved = normalizeLocation(employeeLocation[n]);
-        let detectedLoc = fromCSV || (fromSaved && locationNames.includes(fromSaved) ? fromSaved : null) || activeLocation;
-
-        if (n === "吉田健志") {
-          detectedLoc = "Ties";
-          byName[n].forEach((row) => {
-            if (new Date(row.dateStr).getDay() === 3) rowLocations[n + "|" + row.dateStr] = "Lien";
-          });
-        } else if (n === "古山美菜子") {
-          detectedLoc = "Lien";
-          byName[n].forEach((row) => {
-            const d = new Date(row.dateStr);
-            if (d.getDay() === 6 || !!HOLIDAYS[row.dateStr]) rowLocations[n + "|" + row.dateStr] = "Ties";
-          });
-        }
+        const detectedLoc = fromCSV || (fromSaved && locationNames.includes(fromSaved) ? fromSaved : null) || activeLocation;
         nameLocations[n] = detectedLoc;
       });
-      setPreview({ byName, selKeys: allKeys, nameLocations, rowLocations, csvLocations: locationByName, parseMeta: best });
+      const correctedPreview = applyNamedPreviewLocationCorrections({ byName, nameLocations, rowLocations });
+      setPreview({
+        byName,
+        selKeys: allKeys,
+        nameLocations: correctedPreview.nameLocations,
+        rowLocations: correctedPreview.rowLocations,
+        csvLocations: locationByName,
+        parseMeta: best,
+      });
       const delimLabel = best?.delimiter === "\t" ? "TAB" : (best?.delimiter || ",");
       showToast(`れこるCSVを解析: ${best.importedCount}件/${best.nameCount}名 (${best.encoding}, 区切り:${delimLabel})`);
     };
@@ -4274,6 +4462,21 @@ export default function App() {
     ...prev,
     nameLocations: { ...prev.nameLocations, [name]: loc },
   }));
+
+  const applyPreviewLocationCorrections = () => {
+    let appliedNames = [];
+    setPreview((prev) => {
+      if (!prev) return prev;
+      const corrected = applyNamedPreviewLocationCorrections(prev);
+      appliedNames = corrected.appliedNames;
+      return {
+        ...prev,
+        nameLocations: corrected.nameLocations,
+        rowLocations: corrected.rowLocations,
+      };
+    });
+    showToast(appliedNames.length ? `店舗補正を適用しました（${appliedNames.join(" / ")}）` : "補正対象がありません", appliedNames.length ? undefined : "err");
+  };
 
   const handleToggleBento = useCallback(async (targetName, dateStr) => {
     const fallbackPrice = getBentoPriceForName(targetName);
@@ -4721,30 +4924,40 @@ export default function App() {
               </span>
             </div>
             {/* 一括店舗割り当て */}
-            {locationNames.length > 1 && (
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "8px 10px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8 }}>
-                <span style={{ fontSize: 12, fontWeight: 700, color: "#166534" }}>📦 一括設定</span>
-                <span style={{ fontSize: 11, color: "#4b5563" }}>全員を</span>
-                <select
-                  defaultValue=""
-                  onChange={(e) => {
-                    if (!e.target.value) return;
-                    const loc = e.target.value;
-                    setPreview((prev) => {
-                      const nl = {};
-                      Object.keys(prev.byName).forEach((n) => { nl[n] = loc; });
-                      return { ...prev, nameLocations: nl };
-                    });
-                    e.target.value = "";
-                  }}
-                  style={{ border: "1px solid #a7c4a7", borderRadius: 6, padding: "4px 8px", fontSize: 12, background: "#fff", cursor: "pointer" }}
-                >
-                  <option value="">店舗を選択…</option>
-                  {locationNames.map((l) => <option key={l} value={l}>{l}</option>)}
-                </select>
-                <span style={{ fontSize: 11, color: "#4b5563" }}>に割り当て</span>
-              </div>
-            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "8px 10px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: "#166534" }}>📦 一括設定</span>
+              {locationNames.length > 1 && (
+                <>
+                  <span style={{ fontSize: 11, color: "#4b5563" }}>全員を</span>
+                  <select
+                    defaultValue=""
+                    onChange={(e) => {
+                      if (!e.target.value) return;
+                      const loc = e.target.value;
+                      setPreview((prev) => {
+                        const nl = {};
+                        Object.keys(prev.byName).forEach((n) => { nl[n] = loc; });
+                        return { ...prev, nameLocations: nl };
+                      });
+                      e.target.value = "";
+                    }}
+                    style={{ border: "1px solid #a7c4a7", borderRadius: 6, padding: "4px 8px", fontSize: 12, background: "#fff", cursor: "pointer" }}
+                  >
+                    <option value="">店舗を選択…</option>
+                    {locationNames.map((l) => <option key={l} value={l}>{l}</option>)}
+                  </select>
+                  <span style={{ fontSize: 11, color: "#4b5563" }}>に割り当て</span>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={applyPreviewLocationCorrections}
+                style={{ border: "1px solid #93c5fd", background: "#eff6ff", color: "#1d4ed8", borderRadius: 999, padding: "5px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+              >
+                吉田/古山補正
+              </button>
+              <span style={{ fontSize: 11, color: "#4b5563" }}>吉田: 水曜Lien / 他Ties　古山: 土祝Ties / 他Lien</span>
+            </div>
             <div style={{ maxHeight: "48vh", overflowY: "auto", marginBottom: 14 }}>
               {Object.entries(preview.byName).map(([name, rows]) => {
                 const assignedLoc = preview.nameLocations?.[name] || activeLocation;
@@ -5225,6 +5438,9 @@ export default function App() {
             onUpdateContractEnd={updateContractEnd}
             onUpdateEmployeeOverride={updateEmployeeOverrideRule}
             onResetEmployeeOverride={resetEmployeeOverrideRule}
+            workRulesByLocation={workRulesByLocation}
+            onUpdateBreakOverride={updateBreakOverride}
+            onResetBreakOverride={resetBreakOverride}
           />
         ) : viewMode === "retired" ? (
           <RetiredStaffList
