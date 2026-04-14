@@ -93,7 +93,9 @@ const KINMU_OPTIONS = ["出勤", "欠勤", "遅刻", "早退", "休日出勤", "
 const TORIKOKO_SHIFT_RULES = {
   morning: { label: "午前", start: "11:00", end: "15:00" },
   afternoon: { label: "午後", start: "15:00", end: "18:30" },
+  full: { label: "通し", start: "11:00", end: "18:30" },
 };
+const TORIKOKO_SHIFT_GUESS_FALLBACK_MINUTES = 90;
 
 const HOLIDAYS = {
   "2026-01-01": "元日", "2026-01-12": "成人の日",
@@ -599,10 +601,40 @@ function normalizeShiftType(v) {
   const value = String(v || "").trim();
   if (value === "morning" || value === "午前") return "morning";
   if (value === "afternoon" || value === "午後") return "afternoon";
+  if (value === "full" || value === "通し") return "full";
   return "";
 }
 function getShiftLabel(shiftType) {
   return TORIKOKO_SHIFT_RULES[normalizeShiftType(shiftType)]?.label || "";
+}
+function getTorikokoShiftDistance(shiftType, startMin, endMin) {
+  const shift = TORIKOKO_SHIFT_RULES[normalizeShiftType(shiftType)];
+  if (!shift) return Number.POSITIVE_INFINITY;
+
+  const shiftStartMin = t2m(shift.start);
+  const shiftEndMin = t2m(shift.end);
+  let score = 0;
+  let compared = 0;
+
+  if (startMin != null && shiftStartMin != null) {
+    score += Math.abs(startMin - shiftStartMin);
+    compared++;
+  }
+  if (endMin != null && shiftEndMin != null) {
+    score += Math.abs(endMin - shiftEndMin);
+    compared++;
+  }
+  if (startMin != null && endMin != null && endMin > startMin && shiftStartMin != null && shiftEndMin != null) {
+    score += Math.abs((endMin - startMin) - (shiftEndMin - shiftStartMin));
+  }
+
+  return compared > 0 ? score : Number.POSITIVE_INFINITY;
+}
+function guessClosestTorikokoShiftType(startMin, endMin) {
+  return Object.keys(TORIKOKO_SHIFT_RULES)
+    .map((shiftType) => ({ shiftType, score: getTorikokoShiftDistance(shiftType, startMin, endMin) }))
+    .sort((a, b) => a.score - b.score)
+    [0]?.shiftType || "";
 }
 function guessTorikokoShiftType(locationName, entry) {
   if (normalizeLocation(locationName) !== "とりここ") return "";
@@ -610,18 +642,32 @@ function guessTorikokoShiftType(locationName, entry) {
   const end = normalizeTimeStr(entry?.rawEnd || entry?.end || entry?.roundedEnd || "");
   const startMin = t2m(start);
   const endMin = t2m(end);
+
+  // 11:00-15:00 / 15:00-18:30 / 11:00-18:30 の3パターンに最も近い勤務を採用する。
+  if (startMin != null && endMin != null && endMin > startMin) {
+    return guessClosestTorikokoShiftType(startMin, endMin);
+  }
   if (startMin != null) {
-    if (startMin < 13 * 60) return "morning";
-    if (startMin >= 14 * 60) return "afternoon";
+    const guessed = guessClosestTorikokoShiftType(startMin, null);
+    const shiftStartMin = t2m(TORIKOKO_SHIFT_RULES[guessed]?.start);
+    if (guessed && shiftStartMin != null && Math.abs(startMin - shiftStartMin) <= TORIKOKO_SHIFT_GUESS_FALLBACK_MINUTES) {
+      return guessed;
+    }
   }
   if (endMin != null) {
-    if (endMin <= 16 * 60) return "morning";
-    if (endMin >= 17 * 60) return "afternoon";
+    const guessed = guessClosestTorikokoShiftType(null, endMin);
+    const shiftEndMin = t2m(TORIKOKO_SHIFT_RULES[guessed]?.end);
+    if (guessed && shiftEndMin != null && Math.abs(endMin - shiftEndMin) <= TORIKOKO_SHIFT_GUESS_FALLBACK_MINUTES) {
+      return guessed;
+    }
   }
   return "";
 }
 function getEntryShiftType(workRule, entry) {
-  return normalizeShiftType(entry?.shiftType) || guessTorikokoShiftType(workRule?.locationName, entry);
+  const guessed = guessTorikokoShiftType(workRule?.locationName, entry);
+  // 打刻が明らかに通し勤務を示す場合は保存済みシフト値より優先する
+  if (guessed === "full") return "full";
+  return normalizeShiftType(entry?.shiftType) || guessed;
 }
 function applyEntryShiftRule(workRule = DEFAULT_WORK_RULE, entry = {}) {
   const base = sanitizeRule(workRule);
@@ -1854,7 +1900,7 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
             {days.map(({ mo, d, key, dow, wdJP }) => {
               const isSat = dow === 6, isSun = dow === 0, isHol = !!HOLIDAYS[key], isWeekend = isSat || isSun || isHol;
               const entry = normalizeAttendanceEntry(entries[key] || {});
-              const selectedShift = normalizeShiftType(entry.shiftType);
+              const selectedShift = getEntryShiftType(workRule, entry);
               const shiftLabel = getShiftLabel(selectedShift);
               const { effectiveStart, effectiveEnd } = resolveEntryTimes(entry, workRule);
               const calc = calcWork(key, effectiveStart, effectiveEnd, workRule, employmentType, entry);
@@ -1924,6 +1970,7 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
                           <option value="">シフト</option>
                           <option value="morning">午前</option>
                           <option value="afternoon">午後</option>
+                          <option value="full">通し</option>
                         </select>
                       )}
                     </div>
@@ -4323,7 +4370,7 @@ export default function App() {
             status: nextStatus,
             shiftType: nextShiftType,
             start:    hasActualTime ? (snapStart(row.rawStart || row.roundedStart, effectiveRule) || "") : "",
-            end:      hasActualTime ? (row.roundedEnd || "") : "",
+            end:      hasActualTime ? (resolveAutoEnd(row.rawEnd, row.roundedEnd, effectiveRule) || row.roundedEnd || "") : "",
             rawStart: row.rawStart || "", rawEnd: row.rawEnd || "",
           };
           if (!merged.shiftType) delete merged.shiftType;
@@ -4639,9 +4686,8 @@ export default function App() {
               <button style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#888" }} onClick={() => setPreview(null)}>✕</button>
             </div>
             <div style={S.noteBox}>
-              <b>スナップルール：</b>
-              {activeWorkRule.snapEarlyThreshold}より前 → <b>{activeWorkRule.snapEarlyTo}</b>に丸め　/　
-              {activeWorkRule.snapRangeStart}〜{activeWorkRule.snapRangeEnd} → <b>{activeWorkRule.snapRangeTo}</b>に丸め<br />
+              <b>とりここの自動判定：</b>
+              午前 <b>11:00〜15:00</b> / 午後 <b>15:00〜18:30</b> / 通し <b>11:00〜18:30</b> を自動判定し、早着は開始時刻、残りは終了時刻へ丸めます。<br />
               ※ 手動修正済み（修）のデータは上書きしません<br />
               <span style={{ color: "#4b5563", fontSize: 11 }}>
                 解析: {preview.parseMeta?.encoding || "-"} / 区切り{preview.parseMeta?.delimiter === "\t" ? "TAB" : (preview.parseMeta?.delimiter || ",")} / ヘッダー行 {preview.parseMeta?.headerRowIndex >= 0 ? preview.parseMeta.headerRowIndex + 1 : "未検出"}
@@ -4703,23 +4749,30 @@ export default function App() {
                     const k = name + "|" + row.dateStr;
                     const rule = getEffectiveRuleAtLocation(name, assignedLoc);
                     const previewShiftType = guessTorikokoShiftType(assignedLoc, row);
-                    const snapped = snapStart(
-                      row.rawStart || row.roundedStart,
-                      applyEntryShiftRule(rule, { ...row, shiftType: previewShiftType })
-                    );
-                    const didSnap = row.rawStart && snapped !== row.rawStart;
+                    const previewShiftLabel = getShiftLabel(previewShiftType);
+                    const effectiveRule = applyEntryShiftRule(rule, { ...row, shiftType: previewShiftType });
+                    const snappedStart = snapStart(row.rawStart || row.roundedStart, effectiveRule);
+                    const snappedEnd = resolveAutoEnd(row.rawEnd, row.roundedEnd, effectiveRule);
+                    const didStartSnap = row.rawStart && snappedStart !== row.rawStart;
+                    const didEndSnap = row.rawEnd && snappedEnd !== row.rawEnd;
                     return (
                       <label key={k} style={{ display: "flex", alignItems: "center", padding: "5px 10px", borderBottom: "1px solid #f5f0e8", cursor: "pointer", fontSize: 12, gap: 6, flexWrap: "wrap" }}>
                         <input type="checkbox" checked={preview.selKeys.has(k)} onChange={() => toggleSelKey(k)} />
                         <span style={{ minWidth: 96, color: "#6b5e4c", fontWeight: 600 }}>{row.dateStr}</span>
+                        {previewShiftLabel && <span style={{ fontSize: 10, background: "#eef2ff", color: "#4338ca", borderRadius: 999, padding: "1px 7px", fontWeight: 700 }}>{previewShiftLabel}</span>}
                         <span>
                           {row.rawStart
-                            ? <><s style={{ color: "#bbb", fontSize: 11 }}>{row.rawStart}</s><span style={{ color: "#888", margin: "0 3px" }}>→</span><b style={{ color: "#1a4d12" }}>{snapped || "—"}</b></>
+                            ? <><s style={{ color: "#bbb", fontSize: 11 }}>{row.rawStart}</s><span style={{ color: "#888", margin: "0 3px" }}>→</span><b style={{ color: "#1a4d12" }}>{snappedStart || "—"}</b></>
                             : <span style={{ color: "#aaa" }}>開始なし</span>}
                         </span>
                         <span style={{ color: "#aaa", margin: "0 2px" }}>〜</span>
-                        <span style={{ color: "#1a1209" }}>{row.roundedEnd || <span style={{ color: "#aaa" }}>未退勤</span>}</span>
-                        {didSnap && <span style={{ fontSize: 10, background: "#dcfce7", color: "#166534", borderRadius: 4, padding: "1px 6px", fontWeight: 700 }}>スナップ</span>}
+                        <span>
+                          {row.rawEnd
+                            ? <><s style={{ color: "#bbb", fontSize: 11 }}>{row.rawEnd}</s><span style={{ color: "#888", margin: "0 3px" }}>→</span><b style={{ color: "#1a1209" }}>{snappedEnd || "—"}</b></>
+                            : <span style={{ color: "#aaa" }}>{snappedEnd || "未退勤"}</span>}
+                        </span>
+                        {didStartSnap && <span style={{ fontSize: 10, background: "#dcfce7", color: "#166534", borderRadius: 4, padding: "1px 6px", fontWeight: 700 }}>開始丸め</span>}
+                        {didEndSnap && <span style={{ fontSize: 10, background: "#fef3c7", color: "#92400e", borderRadius: 4, padding: "1px 6px", fontWeight: 700 }}>終了カット</span>}
                       </label>
                     );
                   })}
