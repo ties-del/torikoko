@@ -924,9 +924,15 @@ function getCsvDailyExportRow(entry, dateStr, workRule = DEFAULT_WORK_RULE, empl
     ? calcActualWork(normalized.rawStart, normalized.rawEnd, effectiveRule, employmentType)
     : null;
   const wasEndCapped = !!effectiveEnd && !!csvRoundedEnd && effectiveEnd !== csvRoundedEnd;
+  const shiftLabel = getShiftLabel(getEntryShiftType(effectiveRule, normalized));
+  const notes = [];
+  if (normalized.modified) notes.push("手修正");
+  if (wasEndCapped) notes.push(`CSV終了丸め:${csvRoundedEnd}`);
 
   return {
     status: normalized.status || "",
+    shift: shiftLabel || "",
+    modified: normalized.modified ? "修" : "",
     rawStart: normalized.rawStart || "",
     roundedStart: effectiveStart || "",
     rawEnd: normalized.rawEnd || "",
@@ -934,7 +940,9 @@ function getCsvDailyExportRow(entry, dateStr, workRule = DEFAULT_WORK_RULE, empl
     actualWork: actualMin != null ? m2t(actualMin) : "",
     roundedWork: calc ? m2t(calc.workMin) : "",
     overtime: calc && calc.overtime > 0 ? m2t(calc.overtime) : "",
-    note: wasEndCapped ? `CSV終了丸め:${csvRoundedEnd}` : "",
+    wage: calc ? calc.wage : 0,
+    overtimeWage: calc ? Math.floor((calc.overtime / 60) * calc.rate) : 0,
+    note: notes.join(" / "),
   };
 }
 
@@ -3317,10 +3325,10 @@ export default function App() {
 
   const getLocationForName = useCallback((name) => {
     const assigned = normalizeLocation(employeeLocation[name]);
-    if (assigned && workRulesByLocation[assigned]) return assigned;
-    if (workRulesByLocation[activeLocation]) return activeLocation;
-    return DEFAULT_WORK_RULE.locationName;
-  }, [employeeLocation, workRulesByLocation, activeLocation]);
+    if (assigned) return assigned;
+    if (workRulesByLocation[DEFAULT_WORK_RULE.locationName]) return DEFAULT_WORK_RULE.locationName;
+    return Object.keys(workRulesByLocation)[0] || DEFAULT_WORK_RULE.locationName;
+  }, [employeeLocation, workRulesByLocation]);
   const getBentoPriceForName = useCallback((name) => {
     return getBentoPriceForLocation(getLocationForName(name));
   }, [getBentoPriceForLocation, getLocationForName]);
@@ -4521,12 +4529,12 @@ export default function App() {
     // ── ヘッダー（社労士提出用） ──
     const head = [
       "氏名", "雇用区分", "所属店舗",
-      "日付", "曜", "勤怠",
+      "日付", "曜", "勤怠", "シフト", "修正",
       "開始実績", "開始丸め", "終了実績", "終了丸め", "勤務時間(丸め)", "備考",
       "出勤合計日数", "勤務合計時間", "平均勤務時間(1日)",
-      "残業合計時間",
+      "残業合計時間", "交通費合計(円)", "臨時支給合計(円)",
       "お弁当回数", "お弁当合計金額(円)",
-      "有給取得日数", "有給換算時間", "有給金額(円)",
+      "有給取得日数", "有給換算時間", "有給金額(円)", "総支給額(円)",
     ];
 
     const lines = [head.map(esc).join(",")];
@@ -4534,48 +4542,58 @@ export default function App() {
     try {
       setLoading(true);
       target.names.forEach((name) => {
-        const entries    = allData[name] || {};
-        const rule       = getEffectiveRule(name);
-        const empType    = normalizeEmployment(employmentSettings[name]);
-        const retiredAt  = retiredSettings[name]?.isRetired ? (retiredSettings[name]?.retiredAt || null) : null;
-        const days       = getPeriodDays(year, month).filter(({ key }) => !retiredAt || key <= retiredAt);
-        const loc = normalizeLocation(employeeLocation[name]) || "";
+        const entries = allData[name] || {};
+        const rule = getEffectiveRule(name);
+        const empType = normalizeEmployment(employmentSettings[name]);
+        const isFullTime = empType === "正社員";
+        const retiredAt = retiredSettings[name]?.isRetired ? (retiredSettings[name]?.retiredAt || null) : null;
+        const days = getPeriodDays(year, month).filter(({ key }) => !retiredAt || key <= retiredAt);
+        const loc = getLocationForName(name);
         const currentSummary = summarizeCsvExportMetrics(entries, days, rule, empType, loc);
+        const prevPeriod = getPreviousPeriod(year, month);
+        const prevSummary = summarizeAttendanceMetrics(prevAllData?.[name] || {}, getPeriodDays(prevPeriod.year, prevPeriod.month), rule, empType);
         const paidDays = currentSummary.paidDays;
-        const isPartTime = empType === "パート";
-        const paidLeaveHours = isPartTime && paidDays > 0 ? formatAverageHours(currentSummary.avgDailyMin) : "";
-
-        let paidLeaveAmount = "";
-        if (isPartTime && paidDays > 0) {
-          const avgHours = currentSummary.avgDailyMin / 60;
-          const rate = rule.hourlyNormal;
-          paidLeaveAmount = Math.round(avgHours * rate * paidDays);
-        }
+        const weekdayRate = sanitizeRule(rule).hourlyNormal;
+        const paidLeaveHours = paidDays > 0 ? formatAverageHours(prevSummary.avgDailyMin) : "";
+        const paidLeaveAmount = paidDays > 0
+          ? Math.round((prevSummary.avgDailyMin / 60) * weekdayRate * paidDays)
+          : "";
 
         const bentoByDate = bentoChecksByName[name] || {};
         const bentoPricePerMeal = getBentoPriceForName(name);
-        const bentoCount  = countBentoEntries(bentoByDate, (dateStr) => !retiredAt || dateStr <= retiredAt);
-        const bentoTotal  = sumBentoEntries(bentoByDate, bentoPricePerMeal, (dateStr) => !retiredAt || dateStr <= retiredAt);
+        const bentoCount = countBentoEntries(bentoByDate, (dateStr) => !retiredAt || dateStr <= retiredAt);
+        const bentoTotal = sumBentoEntries(bentoByDate, bentoPricePerMeal, (dateStr) => !retiredAt || dateStr <= retiredAt);
+        const fareTotal = calcFareTotal(name, currentSummary.workDays, year, month, fareConfig, fareSettings);
+        const extrasTotal = calcExtrasTotal(name, year, month, extras);
 
         const detailRows = days.map(({ key: dateStr, mo, d, dow }) => ({
           dateLabel: `${mo}/${d}`,
           weekday: WD[dow],
           ...getCsvDailyExportRow(entries[dateStr] || {}, dateStr, rule, empType, loc),
         })).filter((row) =>
-          row.status || row.rawStart || row.roundedStart || row.rawEnd || row.roundedEnd
+          row.status || row.shift || row.rawStart || row.roundedStart || row.rawEnd || row.roundedEnd || row.modified
         );
 
         const rowsToWrite = detailRows.length ? detailRows : [{
           dateLabel: "",
           weekday: "",
           status: "",
+          shift: "",
+          modified: "",
           rawStart: "",
           roundedStart: "",
           rawEnd: "",
           roundedEnd: "",
           roundedWork: "",
           note: "",
+          wage: 0,
+          overtimeWage: 0,
         }];
+
+        const wageTotal = detailRows.reduce((sum, row) => sum + (Number(row.wage) || 0), 0);
+        const overtimeWageTotal = detailRows.reduce((sum, row) => sum + (Number(row.overtimeWage) || 0), 0);
+        const baseWage = isFullTime ? (monthlySalarySettings[name] ?? 0) + overtimeWageTotal : wageTotal;
+        const grandTotal = Math.max(0, baseWage + (Number(paidLeaveAmount) || 0) + fareTotal + extrasTotal - bentoTotal);
 
         rowsToWrite.forEach((row, idx) => {
           lines.push([
@@ -4585,6 +4603,8 @@ export default function App() {
             row.dateLabel,
             row.weekday,
             row.status,
+            row.shift,
+            row.modified,
             row.rawStart,
             row.roundedStart,
             row.rawEnd,
@@ -4595,18 +4615,21 @@ export default function App() {
             idx === 0 ? m2t(currentSummary.totalWorkMin) : "",
             idx === 0 ? formatAverageHours(currentSummary.avgDailyMin) : "",
             idx === 0 ? (currentSummary.totalOvertimeMin > 0 ? m2t(currentSummary.totalOvertimeMin) : "0:00") : "",
+            idx === 0 ? fareTotal : "",
+            idx === 0 ? extrasTotal : "",
             idx === 0 ? bentoCount : "",
             idx === 0 ? bentoTotal : "",
             idx === 0 ? paidDays : "",
             idx === 0 ? paidLeaveHours : "",
             idx === 0 ? paidLeaveAmount : "",
+            idx === 0 ? grandTotal : "",
           ].map(esc).join(","));
         });
       });
 
       const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-      const url  = URL.createObjectURL(blob);
-      const a    = Object.assign(document.createElement("a"), { href: url, download: `${target.title}_社労士用.csv` });
+      const url = URL.createObjectURL(blob);
+      const a = Object.assign(document.createElement("a"), { href: url, download: `${target.title}_社労士用.csv` });
       document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
       showToast(`CSV出力しました（${target.names.length}名）`);
     } catch (e) {
@@ -4615,7 +4638,6 @@ export default function App() {
       setLoading(false);
     }
   };
-
   const printSheet = () => {
     const target = getExportTarget();
     if (target.error) { showToast(target.error, "err"); return; }
