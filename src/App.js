@@ -2093,9 +2093,11 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
                   </td>
                   {/* 時給 */}
                   <td style={{ ...S.td, borderLeft: "1px solid #f0ece4", textAlign: "right", paddingRight: 8 }}>
-                    {calc
-                      ? <span style={{ fontSize: 11, fontWeight: 600, color: isWeekend ? "#2563eb" : "#6b5e4c" }}>¥{calc.rate.toLocaleString()}</span>
-                      : <span style={{ color: "#ddd" }}>—</span>}
+                    {isFullTime
+                      ? <span style={{ color: "#ccc", fontSize: 11 }}>—</span>
+                      : calc
+                        ? <span style={{ fontSize: 11, fontWeight: 600, color: isWeekend ? "#2563eb" : "#6b5e4c" }}>¥{calc.rate.toLocaleString()}</span>
+                        : <span style={{ color: "#ddd" }}>—</span>}
                   </td>
                   {/* 日給 */}
                   <td style={{ ...S.td, borderLeft: "1px solid #f0ece4", textAlign: "right", paddingRight: 10 }}>
