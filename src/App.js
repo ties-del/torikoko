@@ -3497,8 +3497,14 @@ export default function App() {
       });
     }
 
+    // 給料単価（個別時給）が設定されていればhourlyNormalを上書き
+    const salaryUnitPrice = paidLeaveSettings[name];
+    if (salaryUnitPrice > 0) {
+      rule = sanitizeRule({ ...rule, hourlyNormal: salaryUnitPrice, locationName: base.locationName });
+    }
+
     return rule;
-  }, [getLocationForName, workRulesByLocation, contractStartByName, contractEndByName, employeeOverrides]);
+  }, [getLocationForName, workRulesByLocation, contractStartByName, contractEndByName, employeeOverrides, paidLeaveSettings]);
   const getEffectiveRule = useCallback((name) => {
     return getEffectiveRuleAtLocation(name, getLocationForName(name));
   }, [getEffectiveRuleAtLocation, getLocationForName]);
