@@ -2489,9 +2489,11 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
                       )}
                     </td>
 
-                    {/* 給料単価 */}
+                    {/* 給料単価（正社員は月給制のため非表示） */}
                     <td style={{ padding: "12px 14px", textAlign: "right" }}>
-                      {isEditing ? (
+                      {isFullTime ? (
+                        <span style={{ color: "#d1d5db", fontSize: 11, background: "#f3f4f6", borderRadius: 6, padding: "3px 8px" }}>月給制</span>
+                      ) : isEditing ? (
                         <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
                           <span style={{ fontSize: 12, color: "#6b7280" }}>¥</span>
                           <input type="number" min={0} step={100} value={paidLeaveSettings[name] ?? 0}
@@ -3497,14 +3499,15 @@ export default function App() {
       });
     }
 
-    // 給料単価（個別時給）が設定されていればhourlyNormalを上書き
+    // 給料単価（個別時給）が設定されていればhourlyNormalを上書き（正社員は月給制なので対象外）
+    const isFullTime = normalizeEmployment(employmentSettings[name]) === "正社員";
     const salaryUnitPrice = paidLeaveSettings[name];
-    if (salaryUnitPrice > 0) {
+    if (!isFullTime && salaryUnitPrice > 0) {
       rule = sanitizeRule({ ...rule, hourlyNormal: salaryUnitPrice, locationName: base.locationName });
     }
 
     return rule;
-  }, [getLocationForName, workRulesByLocation, contractStartByName, contractEndByName, employeeOverrides, paidLeaveSettings]);
+  }, [getLocationForName, workRulesByLocation, contractStartByName, contractEndByName, employeeOverrides, paidLeaveSettings, employmentSettings]);
   const getEffectiveRule = useCallback((name) => {
     return getEffectiveRuleAtLocation(name, getLocationForName(name));
   }, [getEffectiveRuleAtLocation, getLocationForName]);
