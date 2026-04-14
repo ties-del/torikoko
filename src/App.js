@@ -4541,7 +4541,12 @@ export default function App() {
 
     try {
       setLoading(true);
-      target.names.forEach((name) => {
+      const sortedNames = [...target.names].sort((a, b) => {
+        const locA = getLocationForName(a);
+        const locB = getLocationForName(b);
+        return locA.localeCompare(locB, "ja") || a.localeCompare(b, "ja");
+      });
+      sortedNames.forEach((name) => {
         const entries = allData[name] || {};
         const rule = getEffectiveRule(name);
         const empType = normalizeEmployment(employmentSettings[name]);
@@ -4599,7 +4604,7 @@ export default function App() {
           lines.push([
             idx === 0 ? name : "",
             idx === 0 ? empType : "",
-            idx === 0 ? loc : "",
+            loc,
             row.dateLabel,
             row.weekday,
             row.status,
