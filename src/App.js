@@ -1083,6 +1083,7 @@ function parseRecoruCSV(text, workRule = DEFAULT_WORK_RULE) {
     endR: timeCandidates[3] ?? -1,
     locationCode: maxCols >= 3 ? 2 : -1, // C列（作業場所コード）
     locationName: maxCols >= 4 ? 3 : (maxCols >= 3 ? 2 : -1), // D列（作業場所名称）
+    kinmuCode: maxCols >= 12 ? 11 : -1, // L列（勤怠区分コード: 01=出勤, 03=有給休暇）
   };
 
   const idx = {
@@ -1094,6 +1095,7 @@ function parseRecoruCSV(text, workRule = DEFAULT_WORK_RULE) {
     endR: findHeaderIndex(headers, ["終了(丸め)", "終了丸め", "終業(丸め)", "end(rounded)"]),
     locationCode: findHeaderIndex(headers, ["作業場所", "就業場所", "作業場所コード", "就業場所コード", "所属店舗コード"]),
     locationName: findHeaderIndex(headers, ["作業場所名称", "就業場所名称", "勤務場所", "所属店舗", "店舗"]),
+    kinmuCode: findHeaderIndex(headers, ["勤怠区分", "勤怠区分コード", "勤怠コード"]),
   };
 
   Object.keys(idx).forEach((k) => {
@@ -1115,6 +1117,8 @@ function parseRecoruCSV(text, workRule = DEFAULT_WORK_RULE) {
     const rawEnd = normalizeTimeStr(cols[idx.end]);
     const roundedStart = normalizeTimeStr(cols[idx.startR]) || rawStart;
     const roundedEnd = normalizeTimeStr(cols[idx.endR]) || rawEnd;
+    const kinmuCode = idx.kinmuCode >= 0 ? String(cols[idx.kinmuCode] || "").trim() : "";
+    const csvStatus = kinmuCode === "03" ? "有給休暇" : "";
 
     if (!byNameMap[name]) byNameMap[name] = {};
     const prev = byNameMap[name][dateStr];
@@ -1125,8 +1129,9 @@ function parseRecoruCSV(text, workRule = DEFAULT_WORK_RULE) {
           rawEnd: chooseLaterTime(prev.rawEnd, rawEnd),
           roundedStart: chooseEarlierTime(prev.roundedStart, roundedStart),
           roundedEnd: chooseLaterTime(prev.roundedEnd, roundedEnd),
+          csvStatus: prev.csvStatus || csvStatus,
         }
-      : { dateStr, rawStart, rawEnd, roundedStart, roundedEnd };
+      : { dateStr, rawStart, rawEnd, roundedStart, roundedEnd, csvStatus };
     byNameMap[name][dateStr] = merged;
 
     const locCode = idx.locationCode >= 0 ? normalizeLocation(cols[idx.locationCode]) : "";
@@ -4584,7 +4589,7 @@ export default function App() {
             continue;
           }
 
-          const nextStatus = existing.status || (hasActualTime ? "出勤" : "");
+          const nextStatus = existing.status || (hasActualTime ? "出勤" : (row.csvStatus || ""));
           const nextShiftType = normalizeShiftType(existing.shiftType) || guessTorikokoShiftType(rowLoc, row);
           const effectiveRule = applyEntryShiftRule(rule, { ...row, shiftType: nextShiftType });
           const merged = {
@@ -4751,16 +4756,15 @@ export default function App() {
       "有給取得日数", "有給換算時間", "有給金額(円)", "総支給額(円)",
     ];
 
-    const lines = [head.map(esc).join(",")];
-
-    try {
-      setLoading(true);
-      const sortedNames = [...target.names].sort((a, b) => {
+    // 名前リストからCSV行配列を生成するヘルパー
+    const buildLinesForNames = (namesForExport) => {
+      const lines = [head.map(esc).join(",")];
+      const sorted = [...namesForExport].sort((a, b) => {
         const locA = getLocationForName(a);
         const locB = getLocationForName(b);
         return locA.localeCompare(locB, "ja") || a.localeCompare(b, "ja");
       });
-      sortedNames.forEach((name) => {
+      sorted.forEach((name) => {
         const entries = allData[name] || {};
         const rule = getEffectiveRule(name);
         const empType = normalizeEmployment(employmentSettings[name]);
@@ -4785,36 +4789,19 @@ export default function App() {
         const fareTotal = calcFareTotal(name, currentSummary.workDays, year, month, fareConfig, fareSettings);
         const extrasTotal = calcExtrasTotal(name, year, month, extras);
 
+        // 全日付を出力（フィルターなし・空白行も含む）
         const detailRows = days.map(({ key: dateStr, mo, d, dow }) => ({
           dateLabel: `${mo}/${d}`,
           weekday: WD[dow],
           ...getCsvDailyExportRow(entries[dateStr] || {}, dateStr, rule, empType, loc),
-        })).filter((row) =>
-          row.status || row.shift || row.rawStart || row.roundedStart || row.rawEnd || row.roundedEnd || row.modified
-        );
-
-        const rowsToWrite = detailRows.length ? detailRows : [{
-          dateLabel: "",
-          weekday: "",
-          status: "",
-          shift: "",
-          modified: "",
-          rawStart: "",
-          roundedStart: "",
-          rawEnd: "",
-          roundedEnd: "",
-          roundedWork: "",
-          note: "",
-          wage: 0,
-          overtimeWage: 0,
-        }];
+        }));
 
         const wageTotal = detailRows.reduce((sum, row) => sum + (Number(row.wage) || 0), 0);
         const overtimeWageTotal = detailRows.reduce((sum, row) => sum + (Number(row.overtimeWage) || 0), 0);
         const baseWage = isFullTime ? (monthlySalarySettings[name] ?? 0) + overtimeWageTotal : wageTotal;
         const grandTotal = Math.max(0, baseWage + (Number(paidLeaveAmount) || 0) + fareTotal + extrasTotal - bentoTotal);
 
-        rowsToWrite.forEach((row, idx) => {
+        detailRows.forEach((row, idx) => {
           lines.push([
             idx === 0 ? name : "",
             idx === 0 ? empType : "",
@@ -4845,12 +4832,41 @@ export default function App() {
           ].map(esc).join(","));
         });
       });
+      return lines;
+    };
 
+    const triggerDownload = (lines, filename) => {
       const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
-      const a = Object.assign(document.createElement("a"), { href: url, download: `${target.title}_社労士用.csv` });
+      const a = Object.assign(document.createElement("a"), { href: url, download: filename });
       document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-      showToast(`CSV出力しました（${target.names.length}名）`);
+    };
+
+    try {
+      setLoading(true);
+
+      if (exportScope === "all") {
+        // 店舗毎に個別ファイルをダウンロード
+        let downloadedCount = 0;
+        for (let i = 0; i < locationNames.length; i++) {
+          const loc = locationNames[i];
+          const storeNames = exportableNames.filter((n) =>
+            (normalizeLocation(employeeLocation[n]) || DEFAULT_WORK_RULE.locationName) === loc
+          );
+          if (!storeNames.length) continue;
+          const lines = buildLinesForNames(storeNames);
+          triggerDownload(lines, `${year}年${month}月_${loc}_社労士用.csv`);
+          downloadedCount++;
+          if (i < locationNames.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        }
+        showToast(`CSV出力しました（${downloadedCount}店舗・店舗別ファイル）`);
+      } else {
+        const lines = buildLinesForNames(target.names);
+        triggerDownload(lines, `${target.title}_社労士用.csv`);
+        showToast(`CSV出力しました（${target.names.length}名）`);
+      }
     } catch (e) {
       showToast(`CSV出力エラー: ${e.message}`, "err");
     } finally {
