@@ -4547,7 +4547,7 @@ export default function App() {
           kind: "settings",
           name,
           location: assignedLoc,
-          promise: dbUpsertSettings(
+          fn: () => dbUpsertSettings(
             user.id, name,
             isNewStaff ? 0 : (fareSettings[name] ?? 0),
             paidLeaveSettings[name] ?? 0,
@@ -4584,13 +4584,13 @@ export default function App() {
               name,
               dateStr: row.dateStr,
               location: rowLoc,
-              promise: dbDeleteAttendance(user.id, name, row.dateStr),
+              fn: () => dbDeleteAttendance(user.id, name, row.dateStr),
             });
             continue;
           }
 
-          const nextStatus = existing.status || (hasActualTime ? "出勤" : (row.csvStatus || ""));
-          const nextShiftType = normalizeShiftType(existing.shiftType) || guessTorikokoShiftType(rowLoc, row);
+          const nextStatus = hasActualTime ? "出勤" : (row.csvStatus || "");
+          const nextShiftType = guessTorikokoShiftType(rowLoc, row);
           const effectiveRule = applyEntryShiftRule(rule, { ...row, shiftType: nextShiftType });
           const merged = {
             ...existing,
@@ -4610,7 +4610,7 @@ export default function App() {
             dateStr: row.dateStr,
             location: rowLoc,
             payload: merged,
-            promise: dbUpsertAttendance(user.id, name, row.dateStr, merged),
+            fn: () => dbUpsertAttendance(user.id, name, row.dateStr, merged),
           });
           count++;
           if (!firstImportedName) firstImportedName = name;
@@ -4621,7 +4621,12 @@ export default function App() {
           }
         }
       }
-      const saveResults = await Promise.allSettled(operations.map((op) => op.promise));
+      const saveResults = [];
+      for (let i = 0; i < operations.length; i += 50) {
+        const batch = operations.slice(i, i + 50);
+        const batchResults = await Promise.allSettled(batch.map((op) => op.fn()));
+        saveResults.push(...batchResults);
+      }
       setEmployeeLocation(nextEmployeeLocation);
       setAllData(next);
       const periodKey = Object.entries(periodCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
