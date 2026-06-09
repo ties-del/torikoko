@@ -90,19 +90,116 @@ const DEFAULT_EMPLOYMENT_TYPE = "パート";
 const RULE_MODE_STORE = "store_shared";
 const RULE_MODE_INDIVIDUAL = "store_individual";
 const KINMU_OPTIONS = ["出勤", "欠勤", "遅刻", "早退", "休日出勤", "有給休暇", "半有給"];
-const TORIKOKO_SHIFT_RULES = {
-  morning: { label: "午前", start: "11:00", end: "15:00" },
+const DEFAULT_TORIKOKO_SHIFT_RULES = {
+  morning:   { label: "午前", start: "11:00", end: "15:00" },
   afternoon: { label: "午後", start: "15:00", end: "18:30" },
-  full: { label: "通し", start: "11:00", end: "18:30" },
+  full:      { label: "通し", start: "11:00", end: "18:30" },
 };
+// UIから変更可能なシフトルール（Reactステートと同期）
+let TORIKOKO_SHIFT_RULES = { ...DEFAULT_TORIKOKO_SHIFT_RULES };
+let SHIFT_RULES_BY_LOCATION = {};
 const TORIKOKO_SHIFT_GUESS_FALLBACK_MINUTES = 90;
 
+const SHIFT_RULES_STORAGE_KEY = "torikoko_shift_rules_v1";
+const SHIFT_RULES_BY_LOCATION_STORAGE_KEY = "shift_rules_by_location_v1";
+function cloneShiftRules(rules) {
+  return Object.fromEntries(
+    Object.entries(rules || {}).map(([key, val]) => [key, { ...val }])
+  );
+}
+function sanitizeShiftRules(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const valid = {};
+  for (const [key, val] of Object.entries(raw)) {
+    if (val?.label && val?.start && val?.end) {
+      valid[key] = { label: String(val.label), start: String(val.start), end: String(val.end) };
+    }
+  }
+  return Object.keys(valid).length > 0 ? valid : null;
+}
+function loadShiftRulesFromStorage() {
+  try {
+    const raw = localStorage.getItem(SHIFT_RULES_STORAGE_KEY);
+    if (!raw) return null;
+    return sanitizeShiftRules(JSON.parse(raw));
+  } catch { return null; }
+}
+function loadShiftRulesByLocationFromStorage() {
+  try {
+    const raw = localStorage.getItem(SHIFT_RULES_BY_LOCATION_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const map = {};
+        for (const [locationName, rules] of Object.entries(parsed)) {
+          const normalizedLocation = normalizeLocation(locationName);
+          const validRules = sanitizeShiftRules(rules);
+          if (normalizedLocation && validRules) map[normalizedLocation] = validRules;
+        }
+        if (Object.keys(map).length > 0) return map;
+      }
+    }
+  } catch {}
+
+  const legacy = loadShiftRulesFromStorage();
+  return {
+    [DEFAULT_WORK_RULE.locationName]: legacy || cloneShiftRules(DEFAULT_TORIKOKO_SHIFT_RULES),
+  };
+}
+function syncShiftRulesByLocation(rulesByLocation) {
+  SHIFT_RULES_BY_LOCATION = rulesByLocation || {};
+  TORIKOKO_SHIFT_RULES = SHIFT_RULES_BY_LOCATION[DEFAULT_WORK_RULE.locationName]
+    || cloneShiftRules(DEFAULT_TORIKOKO_SHIFT_RULES);
+}
+function saveShiftRulesByLocationToStorage(rulesByLocation) {
+  syncShiftRulesByLocation(rulesByLocation);
+  try { localStorage.setItem(SHIFT_RULES_BY_LOCATION_STORAGE_KEY, JSON.stringify(rulesByLocation)); } catch {}
+}
+function getShiftRulesForLocation(locationName) {
+  const normalizedLocation = normalizeLocation(locationName) || DEFAULT_WORK_RULE.locationName;
+  return SHIFT_RULES_BY_LOCATION[normalizedLocation]
+    || (normalizedLocation === DEFAULT_WORK_RULE.locationName ? TORIKOKO_SHIFT_RULES : DEFAULT_TORIKOKO_SHIFT_RULES);
+}
+function hasShiftRulesForLocation(locationName) {
+  const normalizedLocation = normalizeLocation(locationName) || DEFAULT_WORK_RULE.locationName;
+  return normalizedLocation === DEFAULT_WORK_RULE.locationName
+    || Object.prototype.hasOwnProperty.call(SHIFT_RULES_BY_LOCATION, normalizedLocation);
+}
+
 const HOLIDAYS = {
+  // 2025年
+  "2025-01-01": "元日", "2025-01-13": "成人の日",
+  "2025-02-11": "建国記念の日", "2025-02-23": "天皇誕生日", "2025-02-24": "天皇誕生日 振替",
+  "2025-03-20": "春分の日",
+  "2025-04-29": "昭和の日",
+  "2025-05-03": "憲法記念日", "2025-05-04": "みどりの日", "2025-05-05": "こどもの日", "2025-05-06": "こどもの日 振替",
+  "2025-07-21": "海の日",
+  "2025-08-11": "山の日",
+  "2025-09-15": "敬老の日", "2025-09-23": "秋分の日",
+  "2025-10-13": "スポーツの日",
+  "2025-11-03": "文化の日", "2025-11-23": "勤労感謝の日", "2025-11-24": "勤労感謝の日 振替",
+  // 2026年
   "2026-01-01": "元日", "2026-01-12": "成人の日",
   "2026-02-11": "建国記念の日", "2026-02-23": "天皇誕生日",
-  "2026-03-20": "春分の日", "2026-04-29": "昭和の日",
+  "2026-03-20": "春分の日",
+  "2026-04-29": "昭和の日",
   "2026-05-03": "憲法記念日", "2026-05-04": "みどりの日", "2026-05-05": "こどもの日",
-  "2026-09-21": "敬老の日", "2026-09-23": "秋分の日",
+  "2026-07-20": "海の日",
+  "2026-08-11": "山の日",
+  "2026-09-21": "敬老の日", "2026-09-22": "国民の休日", "2026-09-23": "秋分の日",
+  "2026-10-12": "スポーツの日",
+  "2026-11-03": "文化の日", "2026-11-23": "勤労感謝の日",
+  // 2027年
+  "2027-01-01": "元日", "2027-01-11": "成人の日",
+  "2027-02-11": "建国記念の日", "2027-02-23": "天皇誕生日",
+  "2027-03-21": "春分の日", "2027-03-22": "春分の日 振替",
+  "2027-04-29": "昭和の日",
+  "2027-05-03": "憲法記念日", "2027-05-04": "みどりの日", "2027-05-05": "こどもの日",
+  "2027-07-19": "海の日",
+  "2027-08-11": "山の日",
+  "2027-09-20": "敬老の日", "2027-09-23": "秋分の日",
+  "2027-10-11": "スポーツの日",
+  "2027-11-03": "文化の日", "2027-11-23": "勤労感謝の日",
 };
 
 const WD = ["日", "月", "火", "水", "木", "金", "土"];
@@ -578,11 +675,14 @@ function replaceAttendanceShiftsPeriodInStorage(userId, allData, year, month) {
 
 function t2m(t) {
   if (!t) return null;
-  const [h, m] = t.split(":").map(Number);
+  const parts = t.split(":");
+  if (parts.length < 2) return null;
+  const h = Number(parts[0]), m = Number(parts[1]);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
   return h * 60 + m;
 }
 function m2t(m) {
-  if (m == null || m < 0) return null;
+  if (m == null || m < 0 || !Number.isFinite(m)) return null;
   return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 }
 function isWE(d) {
@@ -602,13 +702,14 @@ function normalizeShiftType(v) {
   if (value === "morning" || value === "午前") return "morning";
   if (value === "afternoon" || value === "午後") return "afternoon";
   if (value === "full" || value === "通し") return "full";
+  if (/^[A-Za-z0-9_-]+$/.test(value)) return value;
   return "";
 }
-function getShiftLabel(shiftType) {
-  return TORIKOKO_SHIFT_RULES[normalizeShiftType(shiftType)]?.label || "";
+function getShiftLabel(shiftType, locationName = DEFAULT_WORK_RULE.locationName) {
+  return getShiftRulesForLocation(locationName)[normalizeShiftType(shiftType)]?.label || "";
 }
-function getTorikokoShiftDistance(shiftType, startMin, endMin) {
-  const shift = TORIKOKO_SHIFT_RULES[normalizeShiftType(shiftType)];
+function getTorikokoShiftDistance(shiftType, startMin, endMin, locationName = DEFAULT_WORK_RULE.locationName) {
+  const shift = getShiftRulesForLocation(locationName)[normalizeShiftType(shiftType)];
   if (!shift) return Number.POSITIVE_INFINITY;
 
   const shiftStartMin = t2m(shift.start);
@@ -630,33 +731,34 @@ function getTorikokoShiftDistance(shiftType, startMin, endMin) {
 
   return compared > 0 ? score : Number.POSITIVE_INFINITY;
 }
-function guessClosestTorikokoShiftType(startMin, endMin) {
-  return Object.keys(TORIKOKO_SHIFT_RULES)
-    .map((shiftType) => ({ shiftType, score: getTorikokoShiftDistance(shiftType, startMin, endMin) }))
+function guessClosestTorikokoShiftType(startMin, endMin, locationName = DEFAULT_WORK_RULE.locationName) {
+  return Object.keys(getShiftRulesForLocation(locationName))
+    .map((shiftType) => ({ shiftType, score: getTorikokoShiftDistance(shiftType, startMin, endMin, locationName) }))
     .sort((a, b) => a.score - b.score)
     [0]?.shiftType || "";
 }
 function guessTorikokoShiftType(locationName, entry) {
-  if (normalizeLocation(locationName) !== "とりここ") return "";
+  if (!hasShiftRulesForLocation(locationName)) return "";
   const start = normalizeTimeStr(entry?.rawStart || entry?.start || entry?.roundedStart || "");
   const end = normalizeTimeStr(entry?.rawEnd || entry?.end || entry?.roundedEnd || "");
   const startMin = t2m(start);
   const endMin = t2m(end);
+  const rules = getShiftRulesForLocation(locationName);
 
-  // 11:00-15:00 / 15:00-18:30 / 11:00-18:30 の3パターンに最も近い勤務を採用する。
+  // 店舗ごとのシフトパターンに最も近い勤務を採用する。
   if (startMin != null && endMin != null && endMin > startMin) {
-    return guessClosestTorikokoShiftType(startMin, endMin);
+    return guessClosestTorikokoShiftType(startMin, endMin, locationName);
   }
   if (startMin != null) {
-    const guessed = guessClosestTorikokoShiftType(startMin, null);
-    const shiftStartMin = t2m(TORIKOKO_SHIFT_RULES[guessed]?.start);
+    const guessed = guessClosestTorikokoShiftType(startMin, null, locationName);
+    const shiftStartMin = t2m(rules[guessed]?.start);
     if (guessed && shiftStartMin != null && Math.abs(startMin - shiftStartMin) <= TORIKOKO_SHIFT_GUESS_FALLBACK_MINUTES) {
       return guessed;
     }
   }
   if (endMin != null) {
-    const guessed = guessClosestTorikokoShiftType(null, endMin);
-    const shiftEndMin = t2m(TORIKOKO_SHIFT_RULES[guessed]?.end);
+    const guessed = guessClosestTorikokoShiftType(null, endMin, locationName);
+    const shiftEndMin = t2m(rules[guessed]?.end);
     if (guessed && shiftEndMin != null && Math.abs(endMin - shiftEndMin) <= TORIKOKO_SHIFT_GUESS_FALLBACK_MINUTES) {
       return guessed;
     }
@@ -671,18 +773,20 @@ function getEntryShiftType(workRule, entry) {
 }
 function applyEntryShiftRule(workRule = DEFAULT_WORK_RULE, entry = {}) {
   const base = sanitizeRule(workRule);
-  if (normalizeLocation(base.locationName) !== "とりここ") return base;
   const shiftType = getEntryShiftType(base, entry);
-  const shift = TORIKOKO_SHIFT_RULES[shiftType];
+  const shift = getShiftRulesForLocation(base.locationName)[shiftType];
   if (!shift) return base;
+  // 個別設定（contractStart/contractEnd）が明示されている場合はシフト検出より優先する
   return {
     ...sanitizeRule({
       ...base,
-      snapEarlyThreshold: shift.start,
-      snapEarlyTo: shift.start,
-      businessEnd: shift.end,
+      snapEarlyThreshold: workRule._contractSnapFixed ? base.snapEarlyThreshold : shift.start,
+      snapEarlyTo:        workRule._contractSnapFixed ? base.snapEarlyTo        : shift.start,
+      businessEnd:        workRule._contractEndFixed  ? base.businessEnd        : shift.end,
     }),
     startRoundWindowMinutes: 30,
+    _contractSnapFixed: workRule._contractSnapFixed,
+    _contractEndFixed:  workRule._contractEndFixed,
   };
 }
 function getPaidLeaveUnits(status) {
@@ -779,7 +883,7 @@ function snapStart(ts, workRule = DEFAULT_WORK_RULE) {
   const earlySnapTo    = t2m(r.snapEarlyTo)        ?? t2m(r.businessStart);
   if (earlyThreshold != null && earlySnapTo != null && t < earlyThreshold) {
     if (earlyWindowMin > 0 && t < (earlyThreshold - earlyWindowMin)) return ts;
-    return m2t(Math.max(earlyThreshold, earlySnapTo));
+    return m2t(earlySnapTo > earlyThreshold ? earlyThreshold : earlySnapTo);
   }
 
   // 範囲スナップ：start === end のとき無効（削除済み）
@@ -959,7 +1063,7 @@ function getCsvDailyExportRow(entry, dateStr, workRule = DEFAULT_WORK_RULE, empl
     ? calcActualWork(normalized.rawStart, normalized.rawEnd, effectiveRule, employmentType)
     : null;
   const wasEndCapped = !!effectiveEnd && !!csvRoundedEnd && effectiveEnd !== csvRoundedEnd;
-  const shiftLabel = getShiftLabel(getEntryShiftType(effectiveRule, normalized));
+  const shiftLabel = getShiftLabel(getEntryShiftType(effectiveRule, normalized), effectiveRule.locationName);
   const notes = [];
   if (normalized.modified) notes.push("手修正");
   if (wasEndCapped) notes.push(`CSV終了丸め:${csvRoundedEnd}`);
@@ -1342,6 +1446,8 @@ function parseBentoXLSX(arrayBuffer, year, month) {
   const usedSheets = [];
   let facilityRaw = "";
   let pricePerMeal = 0;
+  // 施設ごとの単価マップ（事業所単位で単価が異なる場合に対応）
+  const priceByFacility = {};
 
   for (const info of targetSheetInfos) {
     const { sheetName: usedSheet, rows, headerRowIndex, dateKeys } = info;
@@ -1363,16 +1469,23 @@ function parseBentoXLSX(arrayBuffer, year, month) {
     if (!sheetFacility) sheetFacility = usedSheet;
     if (!facilityRaw) facilityRaw = sheetFacility;
 
-    if (!pricePerMeal) {
-      for (let r = 0; r < Math.min(rows.length, 8); r++) {
-        const row = rows[r] || [];
-        for (let c = 0; c < row.length; c++) {
-          if (String(row[c] || "").includes("単価")) {
-            const p = Number(row[c + 1]) || 0;
-            if (p > 0) pricePerMeal = p;
-          }
+    // シートごとに単価を検出（「単価」「金額」「お弁当代」などのキーワードを検索）
+    let sheetPrice = 0;
+    for (let r = 0; r < Math.min(rows.length, 8); r++) {
+      const row = rows[r] || [];
+      for (let c = 0; c < row.length; c++) {
+        const cellStr = String(row[c] || "");
+        if (/単価|弁当代|弁当金額|1食/.test(cellStr)) {
+          // 右隣のセルか、数字部分を抽出
+          const p = Number(row[c + 1]) || Number(String(cellStr).replace(/[^0-9]/g, "")) || 0;
+          if (p > 0 && p < 10000) { sheetPrice = p; break; }
         }
       }
+      if (sheetPrice) break;
+    }
+    if (sheetPrice > 0) {
+      priceByFacility[sheetFacility] = sheetPrice;
+      if (!pricePerMeal) pricePerMeal = sheetPrice; // 後方互換のため最初のシートの単価を保持
     }
 
     let currentName = "";
@@ -1392,7 +1505,7 @@ function parseBentoXLSX(arrayBuffer, year, month) {
     }
   }
 
-  return { byName, locationByName, pricePerMeal, facilityRaw, usedSheet: usedSheets[0] || "", usedSheets };
+  return { byName, locationByName, pricePerMeal, priceByFacility, facilityRaw, usedSheet: usedSheets[0] || "", usedSheets };
 }
 
 function getErrText(error) {
@@ -1828,7 +1941,8 @@ async function dbDeleteEmployee(userId, name) {
 // ─── 勤怠テーブル（一人分）────────────────────────────────────────────────────
 function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpdate, onToggleBento, workRule, employmentType, bentoByDate, bentoPricePerMeal, monthlySalary, retiredAt, fareConfig, extras }) {
   const isFullTime = normalizeEmployment(employmentType) === "正社員";
-  const supportsDailyShift = normalizeLocation(workRule?.locationName) === "とりここ";
+  const supportsDailyShift = hasShiftRulesForLocation(workRule?.locationName);
+  const shiftRulesForLocation = getShiftRulesForLocation(workRule?.locationName);
   const [editing, setEditing] = useState(null);
   const [tempVal, setTempVal] = useState("");
   const { year: prevYear, month: prevMonth } = getPreviousPeriod(year, month);
@@ -1860,7 +1974,7 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
 
   const setShiftType = (dateStr, shiftType) =>
     {
-      const nextLabel = getShiftLabel(shiftType) || "未設定";
+      const nextLabel = getShiftLabel(shiftType, workRule?.locationName) || "未設定";
       if (!window.confirm(`${name} の ${dateStr} のシフトを「${nextLabel}」で保存しますか？`)) return;
       onUpdate(name, dateStr, (() => {
       const current = normalizeAttendanceEntry(entries[dateStr] || {});
@@ -1949,7 +2063,7 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
               const isSat = dow === 6, isSun = dow === 0, isHol = !!HOLIDAYS[key], isWeekend = isSat || isSun || isHol;
               const entry = normalizeAttendanceEntry(entries[key] || {});
               const selectedShift = getEntryShiftType(workRule, entry);
-              const shiftLabel = getShiftLabel(selectedShift);
+              const shiftLabel = getShiftLabel(selectedShift, workRule?.locationName);
               const { effectiveStart, effectiveEnd } = resolveEntryTimes(entry, workRule);
               const calc = calcWork(key, effectiveStart, effectiveEnd, workRule, employmentType, entry);
               const actualWorkMin = (entry.rawStart && entry.rawEnd)
@@ -2013,12 +2127,12 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
                             minWidth: 72,
                             fontWeight: selectedShift ? 700 : 500,
                           }}
-                          title={shiftLabel ? `${shiftLabel}シフト` : "とりここの日別シフト"}
+                          title={shiftLabel ? `${shiftLabel}シフト` : `${sanitizeRule(workRule).locationName}の日別シフト`}
                         >
                           <option value="">シフト</option>
-                          <option value="morning">午前</option>
-                          <option value="afternoon">午後</option>
-                          <option value="full">通し</option>
+                          {Object.entries(shiftRulesForLocation).map(([type, rule]) => (
+                            <option key={type} value={type}>{rule.label}</option>
+                          ))}
                         </select>
                       )}
                     </div>
@@ -2297,13 +2411,14 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
   onUpdateContractStart, onUpdateContractEnd, onUpdateEmployeeOverride, onResetEmployeeOverride,
   workRulesByLocation, onUpdateBreakOverride, onResetBreakOverride }) {
 
-  const [editingName, setEditingName] = useState(null); // 編集中の行
-  const [addOpen, setAddOpen]         = useState(false);
-  const [newName, setNewName]         = useState("");
-  const [newLoc, setNewLoc]           = useState(locationNames[0] || "");
-  const [filterLoc, setFilterLoc]     = useState(activeLocation || "all");
+  const [addOpen, setAddOpen]     = useState(false);
+  const [newName, setNewName]     = useState("");
+  const [newLoc, setNewLoc]       = useState(locationNames[0] || "");
+  const [filterLoc, setFilterLoc] = useState(activeLocation || "all");
   // 休憩閾値（時間）は小数入力中に文字列で保持する
   const [breakHoursDraft, setBreakHoursDraft] = useState({});
+  // 展開中の休憩設定行
+  const [breakExpandName, setBreakExpandName] = useState(null);
   const defaultLocation = locationNames.includes(DEFAULT_WORK_RULE.locationName)
     ? DEFAULT_WORK_RULE.locationName
     : (locationNames[0] || DEFAULT_WORK_RULE.locationName);
@@ -2382,305 +2497,235 @@ function StaffManager({ allData, locationNames, employeeLocation, employmentSett
       )}
 
       {/* ── スタッフテーブル ── */}
-      <div style={{ background: "#fff", border: "1px solid #eee2d8", borderRadius: 14, overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ background: "#1a2e1a" }}>
-              {["番号", "氏名", "所属店舗", "雇用区分", "給料金額", "交通費", "給料単価", ""].map((h, i) => (
-                <th key={i} style={{ padding: "11px 14px", textAlign: i > 2 ? "right" : "left", fontSize: 11, fontWeight: 800, color: "#8db08d", whiteSpace: "nowrap" }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((name, idx) => {
-              const loc = normalizeLocation(employeeLocation[name]) || defaultLocation;
-              const sc = storeColor(loc);
-              const empType = normalizeEmployment(employmentSettings[name]);
-              const isFullTime = empType === "正社員";
-              const isEditing = editingName === name;
+      <div style={{ overflowX: "auto" }}>
+        <div style={{ background: "#fff", border: "1px solid #eee2d8", borderRadius: 14, overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.06)", minWidth: 860 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#1a2e1a" }}>
+                {["#", "氏名", "店舗", "雇用区分", "出勤時刻", "退勤時刻", "休憩", "交通費", "時給 / 月給", ""].map((h, i) => (
+                  <th key={i} style={{ padding: "10px 12px", textAlign: i >= 7 ? "right" : "left", fontSize: 11, fontWeight: 800, color: "#8db08d", whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((name, idx) => {
+                const loc = normalizeLocation(employeeLocation[name]) || defaultLocation;
+                const sc = storeColor(loc);
+                const empType = normalizeEmployment(employmentSettings[name]);
+                const isFullTime = empType === "正社員";
+                const contractStart = contractStartByName[name] || "";
+                const contractEnd = contractEndByName[name] || "";
+                const hasBreakOverride = !!employeeOverrides[name]?.breakRule;
+                const breakRule = employeeOverrides[name]?.breakRule || {};
+                const baseLocRule = sanitizeRule(workRulesByLocation?.[loc] || {});
+                const isBreakExpanded = breakExpandName === name;
 
-              const hasIndividualContract = !!employeeOverrides[name]?.enabled;
-              const contractStart = contractStartByName[name] || "";
-              const contractEnd = contractEndByName[name] || "";
-              const contractSummary = `始め設定 ${contractStart || "未設定"} / 終了設定 ${contractEnd || "未設定"}`;
+                const ftHDisplay = breakHoursDraft[name]?.ftH ?? (hasBreakOverride
+                  ? String(breakRule.breakThresholdMinutesFullTime / 60)
+                  : String(baseLocRule.breakThresholdMinutesFullTime / 60));
+                const ptHDisplay = breakHoursDraft[name]?.ptH ?? (hasBreakOverride
+                  ? String(breakRule.breakThresholdMinutesPartTime / 60)
+                  : String(baseLocRule.breakThresholdMinutesPartTime / 60));
 
-              const hasBreakOverride = !!employeeOverrides[name]?.breakRule;
-              const breakRule = employeeOverrides[name]?.breakRule || {};
-              const baseLocRule = sanitizeRule(workRulesByLocation?.[loc] || {});
-              const ftHDisplay = breakHoursDraft[name]?.ftH ?? (hasBreakOverride
-                ? String(breakRule.breakThresholdMinutesFullTime / 60)
-                : String(baseLocRule.breakThresholdMinutesFullTime / 60));
-              const ptHDisplay = breakHoursDraft[name]?.ptH ?? (hasBreakOverride
-                ? String(breakRule.breakThresholdMinutesPartTime / 60)
-                : String(baseLocRule.breakThresholdMinutesPartTime / 60));
+                const breakSummary = hasBreakOverride
+                  ? `${breakRule.breakMinutesPartTime ?? baseLocRule.breakMinutesPartTime}分/${ptHDisplay}h`
+                  : `${baseLocRule.breakMinutesPartTime}分/${baseLocRule.breakThresholdMinutesPartTime / 60}h`;
 
-              return (
-                <Fragment key={name}>
-                  <tr style={{
-                    background: idx % 2 === 0 ? "#fff" : "#fafaf8",
-                    borderBottom: isEditing ? "none" : "1px solid #f0ece4",
-                    transition: "background 0.15s",
-                  }}>
-                    {/* No */}
-                    <td style={{ padding: "12px 14px", fontSize: 12, color: "#bbb", fontWeight: 700, width: 42 }}>{idx + 1}</td>
+                const inp = (style) => ({ border: "1px solid #cbd5e1", borderRadius: 7, padding: "5px 7px", fontSize: 12, background: "#fff", outline: "none", ...style });
 
-                    {/* 氏名 */}
-                    <td style={{ padding: "12px 14px", fontWeight: 800, fontSize: 14, color: "#1a2e1a", whiteSpace: "nowrap" }}>
-                      <button onClick={() => onSelectStaff(name)} style={{
-                        background: "none", border: "none", padding: 0, cursor: "pointer",
-                        fontSize: 14, fontWeight: 800, color: "#1a2e1a", textDecoration: "none",
-                        display: "flex", alignItems: "center", gap: 6,
-                      }}>
-                        <span style={{ width: 28, height: 28, borderRadius: "50%", background: sc.bg, border: `1px solid ${sc.border}`, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: sc.text, fontWeight: 800 }}>
-                          {name[0]}
-                        </span>
-                        {name}
-                      </button>
-                    </td>
+                return (
+                  <Fragment key={name}>
+                    <tr style={{ background: idx % 2 === 0 ? "#fff" : "#fafaf8", borderBottom: isBreakExpanded ? "none" : "1px solid #f0ece4" }}>
 
-                    {/* 所属店舗 — 常にドロップダウンで即変更可 */}
-                    <td style={{ padding: "12px 14px" }}>
-                      <select value={loc} onChange={(e) => onUpdateLocation(name, e.target.value)}
-                        style={{ border: `2px solid ${sc.border}`, borderRadius: 8, padding: "5px 8px", fontSize: 12, cursor: "pointer", outline: "none", background: sc.bg, color: sc.text, fontWeight: 700 }}>
-                        {locationNames.map((l) => <option key={l} value={l}>{l}</option>)}
-                      </select>
-                    </td>
+                      {/* # */}
+                      <td style={{ padding: "10px 12px", fontSize: 11, color: "#bbb", fontWeight: 700, width: 36 }}>{idx + 1}</td>
 
-                    {/* 雇用区分 */}
-                    <td style={{ padding: "12px 14px" }}>
-                      {isEditing ? (
+                      {/* 氏名 */}
+                      <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}>
+                        <button onClick={() => onSelectStaff(name)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ width: 26, height: 26, borderRadius: "50%", background: sc.bg, border: `1px solid ${sc.border}`, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: sc.text, fontWeight: 800, flexShrink: 0 }}>
+                            {name[0]}
+                          </span>
+                          <span style={{ fontSize: 13, fontWeight: 800, color: "#1a2e1a" }}>{name}</span>
+                        </button>
+                      </td>
+
+                      {/* 店舗 */}
+                      <td style={{ padding: "10px 12px" }}>
+                        <select value={loc} onChange={(e) => onUpdateLocation(name, e.target.value)}
+                          style={{ ...inp({ background: sc.bg, color: sc.text, borderColor: sc.border, fontWeight: 700 }) }}>
+                          {locationNames.map((l) => <option key={l} value={l}>{l}</option>)}
+                        </select>
+                      </td>
+
+                      {/* 雇用区分 */}
+                      <td style={{ padding: "10px 12px" }}>
                         <select value={empType} onChange={(e) => onUpdateEmployment(name, e.target.value)}
-                          style={{ border: "2px solid #d1fae5", borderRadius: 8, padding: "5px 8px", fontSize: 12, cursor: "pointer", outline: "none" }}>
+                          style={{ ...inp({ background: isFullTime ? "#eff6ff" : "#fff7ed", color: isFullTime ? "#1d4ed8" : "#c2410c", borderColor: isFullTime ? "#bfdbfe" : "#fed7aa", fontWeight: 700 }) }}>
                           {EMPLOYMENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                         </select>
-                      ) : (
-                        <span style={{ background: isFullTime ? "#eff6ff" : "#fff7ed", color: isFullTime ? "#1d4ed8" : "#c2410c", border: `1px solid ${isFullTime ? "#bfdbfe" : "#fed7aa"}`, borderRadius: 999, padding: "4px 10px", fontSize: 12, fontWeight: 700 }}>
-                          {empType}
-                        </span>
-                      )}
-                    </td>
+                      </td>
 
-                    {/* 給料金額 */}
-                    <td style={{ padding: "12px 14px", textAlign: "right" }}>
-                      {isEditing ? (
-                        <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
-                          <span style={{ fontSize: 12, color: "#6b7280" }}>¥</span>
-                          <input type="number" min={0} step={1000}
-                            value={monthlySalarySettings[name] ?? 0}
-                            onChange={(e) => onUpdateMonthly(name, +e.target.value)}
-                            style={{ width: 100, border: "2px solid #bfdbfe", borderRadius: 8, padding: "5px 8px", fontSize: 13, fontWeight: 700, textAlign: "right", outline: "none" }} />
-                          <span style={{ fontSize: 11, color: "#6b7280" }}>/月</span>
+                      {/* 出勤時刻 */}
+                      <td style={{ padding: "10px 12px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <input type="time" value={contractStart}
+                            onChange={(e) => onUpdateContractStart(name, e.target.value || "")}
+                            style={{ ...inp({ width: 100, color: contractStart ? "#1a2e1a" : "#9ca3af" }) }} />
+                          {contractStart && (
+                            <button onClick={() => onUpdateContractStart(name, "")}
+                              style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: 13, padding: 0, lineHeight: 1 }}>✕</button>
+                          )}
                         </div>
-                      ) : (
-                        <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 700, color: "#1a2e1a", fontSize: 13 }}>
-                          {(monthlySalarySettings[name] ?? 0) > 0
-                            ? <>{`¥${(monthlySalarySettings[name]).toLocaleString()}`}<span style={{ fontSize: 10, color: "#6b7280", marginLeft: 3 }}>/月</span></>
-                            : <span style={{ color: "#ccc" }}>未設定</span>}
-                        </span>
-                      )}
-                    </td>
+                        {!contractStart && <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>自動（シフト判定）</div>}
+                      </td>
 
-                    {/* 交通費 */}
-                    <td style={{ padding: "12px 14px", textAlign: "right" }}>
-                      {isEditing ? (
-                        <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
-                          <span style={{ fontSize: 12, color: "#6b7280" }}>¥</span>
+                      {/* 退勤時刻 */}
+                      <td style={{ padding: "10px 12px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <input type="time" value={contractEnd}
+                            onChange={(e) => onUpdateContractEnd(name, e.target.value || "")}
+                            style={{ ...inp({ width: 100, color: contractEnd ? "#1a2e1a" : "#9ca3af" }) }} />
+                          {contractEnd && (
+                            <button onClick={() => onUpdateContractEnd(name, "")}
+                              style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: 13, padding: 0, lineHeight: 1 }}>✕</button>
+                          )}
+                        </div>
+                        {!contractEnd && <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>自動（シフト判定）</div>}
+                      </td>
+
+                      {/* 休憩 */}
+                      <td style={{ padding: "10px 12px" }}>
+                        <button onClick={() => setBreakExpandName(isBreakExpanded ? null : name)}
+                          style={{ ...inp({ cursor: "pointer", color: hasBreakOverride ? "#4338ca" : "#6b7280", borderColor: hasBreakOverride ? "#c7d2fe" : "#e5e7eb", background: hasBreakOverride ? "#eef2ff" : "#f9fafb", whiteSpace: "nowrap", padding: "5px 10px" }) }}>
+                          {breakSummary} {isBreakExpanded ? "▲" : "▼"}
+                        </button>
+                      </td>
+
+                      {/* 交通費 */}
+                      <td style={{ padding: "10px 12px", textAlign: "right" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
+                          <span style={{ fontSize: 11, color: "#9ca3af" }}>¥</span>
                           <input type="number" min={0} step={10} value={fareSettings[name] ?? 0}
                             onChange={(e) => onUpdateFare(name, +e.target.value)}
-                            style={{ width: 70, border: "2px solid #d1fae5", borderRadius: 8, padding: "5px 8px", fontSize: 13, fontWeight: 700, textAlign: "right", outline: "none" }} />
+                            style={{ ...inp({ width: 72, textAlign: "right" }) }} />
                         </div>
-                      ) : (
-                        <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 13, color: (fareSettings[name] ?? 0) > 0 ? "#1a2e1a" : "#ccc", fontWeight: 700 }}>
-                          {(fareSettings[name] ?? 0) > 0 ? `¥${(fareSettings[name]).toLocaleString()}` : "—"}
-                        </span>
-                      )}
-                    </td>
+                      </td>
 
-                    {/* 給料単価（正社員は月給制のため非表示） */}
-                    <td style={{ padding: "12px 14px", textAlign: "right" }}>
-                      {isFullTime ? (
-                        <span style={{ color: "#d1d5db", fontSize: 11, background: "#f3f4f6", borderRadius: 6, padding: "3px 8px" }}>月給制</span>
-                      ) : isEditing ? (
-                        <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
-                          <span style={{ fontSize: 12, color: "#6b7280" }}>¥</span>
-                          <input type="number" min={0} step={100} value={paidLeaveSettings[name] ?? 0}
-                            onChange={(e) => onUpdatePaid(name, +e.target.value)}
-                            style={{ width: 70, border: "2px solid #d1fae5", borderRadius: 8, padding: "5px 8px", fontSize: 13, fontWeight: 700, textAlign: "right", outline: "none" }} />
-                        </div>
-                      ) : (
-                        <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 13, color: (paidLeaveSettings[name] ?? 0) > 0 ? "#166534" : "#ccc", fontWeight: 700 }}>
-                          {(paidLeaveSettings[name] ?? 0) > 0 ? `¥${(paidLeaveSettings[name]).toLocaleString()}` : "—"}
-                        </span>
-                      )}
-                    </td>
+                      {/* 時給 / 月給 */}
+                      <td style={{ padding: "10px 12px", textAlign: "right" }}>
+                        {isFullTime ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
+                            <span style={{ fontSize: 11, color: "#9ca3af" }}>¥</span>
+                            <input type="number" min={0} step={1000} value={monthlySalarySettings[name] ?? 0}
+                              onChange={(e) => onUpdateMonthly(name, +e.target.value)}
+                              style={{ ...inp({ width: 88, textAlign: "right" }) }} />
+                            <span style={{ fontSize: 10, color: "#9ca3af" }}>/月</span>
+                          </div>
+                        ) : (
+                          <div style={{ display: "flex", alignItems: "center", gap: 3, justifyContent: "flex-end" }}>
+                            <span style={{ fontSize: 11, color: "#9ca3af" }}>¥</span>
+                            <input type="number" min={0} step={10} value={paidLeaveSettings[name] ?? 0}
+                              onChange={(e) => onUpdatePaid(name, +e.target.value)}
+                              style={{ ...inp({ width: 72, textAlign: "right" }) }} />
+                            <span style={{ fontSize: 10, color: "#9ca3af" }}>/h</span>
+                          </div>
+                        )}
+                      </td>
 
-                    {/* アクション */}
-                    <td style={{ padding: "12px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
-                      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                        <button onClick={() => {
-                            if (isEditing) {
-                              if (onSave) onSave(name);
-                              // breakHoursDraft に残っている閾値を確定保存
-                              const hd = breakHoursDraft[name];
-                              if (hd && hasBreakOverride) {
-                                if (hd.ftH !== undefined) onUpdateBreakOverride(name, { breakThresholdMinutesFullTime_h: Number(hd.ftH) || 0 });
-                                if (hd.ptH !== undefined) onUpdateBreakOverride(name, { breakThresholdMinutesPartTime_h: Number(hd.ptH) || 0 });
-                              }
-                              setBreakHoursDraft((prev) => { const n = { ...prev }; delete n[name]; return n; });
-                            }
-                            setEditingName(isEditing ? null : name);
-                          }}
-                          style={{ border: isEditing ? "2px solid #166534" : "1px solid #d1fae5", background: isEditing ? "#166534" : "#f0fdf4", color: isEditing ? "#fff" : "#166534",
-                            borderRadius: 8, padding: "6px 12px", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-                          {isEditing ? "✓ 保存" : "✏ 編集"}
-                        </button>
-                        <button onClick={() => onRetire && onRetire(name)}
-                          style={{ border: "1px solid #fed7aa", background: "#fff7ed", color: "#c2410c", borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 800, cursor: "pointer" }}
-                          title="退職登録">
-                          退職
-                        </button>
-                        <button onClick={() => onRemove(name)}
-                          style={{ border: "1px solid #fee2e2", background: "#fff", color: "#dc2626", borderRadius: 8, padding: "6px 10px", fontSize: 11, fontWeight: 800, cursor: "pointer" }}
-                          title="データ完全削除">
-                          🗑
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                  {isEditing && (
-                    <tr style={{ background: idx % 2 === 0 ? "#fcfcfb" : "#f6f6f3", borderBottom: "1px solid #f0ece4" }}>
-                      <td colSpan={8} style={{ padding: "0 14px 14px" }}>
-                        <div style={{ marginTop: 4, border: "1px solid #dbeafe", background: "#f8fbff", borderRadius: 12, padding: 12, display: "grid", gap: 10 }}>
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                              <span style={{ fontSize: 12, fontWeight: 800, color: "#334155" }}>個別設定</span>
-                              <span style={{ fontSize: 11, color: "#64748b" }}>{contractSummary}</span>
-                            </div>
-                            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: hasIndividualContract ? "#4338ca" : "#4b5563" }}>
-                              <span>個別契約</span>
-                              <select
-                                value={hasIndividualContract ? "individual" : "shared"}
-                                onChange={(e) => {
-                                  if (e.target.value === "individual") onUpdateEmployeeOverride(name, {});
-                                  else onResetEmployeeOverride(name);
-                                }}
-                                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 8px", fontSize: 12, background: "#fff", outline: "none", cursor: "pointer" }}
-                              >
-                                <option value="shared">店舗共通</option>
-                                <option value="individual">個別設定</option>
-                              </select>
-                            </label>
-                          </div>
-                          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end" }}>
-                            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, fontWeight: 700, color: "#475569" }}>
-                              <span>始め設定（丸め）</span>
-                              <input
-                                type="time"
-                                value={contractStart}
-                                onChange={(e) => onUpdateContractStart(name, e.target.value || "")}
-                                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 8px", fontSize: 12, background: "#fff", width: 108 }}
-                              />
-                            </label>
-                            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, fontWeight: 700, color: "#475569" }}>
-                              <span>終了設定（丸め）</span>
-                              <input
-                                type="time"
-                                value={contractEnd}
-                                onChange={(e) => onUpdateContractEnd(name, e.target.value || "")}
-                                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 8px", fontSize: 12, background: "#fff", width: 108 }}
-                              />
-                            </label>
-                          </div>
-                          <div style={{ fontSize: 11, color: "#64748b" }}>始め設定は30分以内の早着だけ丸めます。終了設定はその時刻以降をその時刻に丸めます。</div>
-
-                          {/* ── 個別休憩設定 ── */}
-                          <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: 10, display: "grid", gap: 8 }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                              <span style={{ fontSize: 12, fontWeight: 800, color: "#334155" }}>☕ 休憩設定（個別）</span>
-                              <select
-                                value={hasBreakOverride ? "individual" : "shared"}
-                                onChange={(e) => {
-                                  if (e.target.value === "individual") {
-                                    onUpdateBreakOverride(name, {
-                                      breakMinutesFullTime: baseLocRule.breakMinutesFullTime,
-                                      breakThresholdMinutesFullTime: baseLocRule.breakThresholdMinutesFullTime,
-                                      breakMinutesPartTime: baseLocRule.breakMinutesPartTime,
-                                      breakThresholdMinutesPartTime: baseLocRule.breakThresholdMinutesPartTime,
-                                    });
-                                    setBreakHoursDraft((prev) => ({
-                                      ...prev,
-                                      [name]: {
-                                        ftH: String(baseLocRule.breakThresholdMinutesFullTime / 60),
-                                        ptH: String(baseLocRule.breakThresholdMinutesPartTime / 60),
-                                      },
-                                    }));
-                                  } else {
-                                    onResetBreakOverride(name);
-                                    setBreakHoursDraft((prev) => { const n = { ...prev }; delete n[name]; return n; });
-                                  }
-                                }}
-                                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 8px", fontSize: 12, background: "#fff", outline: "none", cursor: "pointer" }}
-                              >
-                                <option value="shared">店舗共通</option>
-                                <option value="individual">個別設定</option>
-                              </select>
-                            </div>
-                            {hasBreakOverride && (
-                              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                                {/* 正社員 */}
-                                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                  <span style={{ fontSize: 11, fontWeight: 700, color: "#475569" }}>正社員</span>
-                                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                                    <input type="number" min={0} max={120}
-                                      value={breakRule.breakMinutesFullTime ?? baseLocRule.breakMinutesFullTime}
-                                      onChange={(e) => onUpdateBreakOverride(name, { breakMinutesFullTime: Math.max(0, Number(e.target.value) || 0) })}
-                                      style={{ width: 52, border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 6px", fontSize: 12, textAlign: "right", outline: "none" }} />
-                                    <span style={{ fontSize: 11, color: "#64748b" }}>分休憩 /</span>
-                                    <input type="number" min={0} max={24} step={0.5}
-                                      value={ftHDisplay}
-                                      onChange={(e) => setBreakHoursDraft((prev) => ({ ...prev, [name]: { ...(prev[name] || {}), ftH: e.target.value } }))}
-                                      onBlur={() => onUpdateBreakOverride(name, { breakThresholdMinutesFullTime_h: Number(ftHDisplay) || 0 })}
-                                      style={{ width: 52, border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 6px", fontSize: 12, textAlign: "right", outline: "none" }} />
-                                    <span style={{ fontSize: 11, color: "#64748b" }}>時間以上</span>
-                                  </div>
-                                </div>
-                                {/* パート */}
-                                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                  <span style={{ fontSize: 11, fontWeight: 700, color: "#475569" }}>パート</span>
-                                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                                    <input type="number" min={0} max={120}
-                                      value={breakRule.breakMinutesPartTime ?? baseLocRule.breakMinutesPartTime}
-                                      onChange={(e) => onUpdateBreakOverride(name, { breakMinutesPartTime: Math.max(0, Number(e.target.value) || 0) })}
-                                      style={{ width: 52, border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 6px", fontSize: 12, textAlign: "right", outline: "none" }} />
-                                    <span style={{ fontSize: 11, color: "#64748b" }}>分休憩 /</span>
-                                    <input type="number" min={0} max={24} step={0.5}
-                                      value={ptHDisplay}
-                                      onChange={(e) => setBreakHoursDraft((prev) => ({ ...prev, [name]: { ...(prev[name] || {}), ptH: e.target.value } }))}
-                                      onBlur={() => onUpdateBreakOverride(name, { breakThresholdMinutesPartTime_h: Number(ptHDisplay) || 0 })}
-                                      style={{ width: 52, border: "1px solid #cbd5e1", borderRadius: 8, padding: "5px 6px", fontSize: 12, textAlign: "right", outline: "none" }} />
-                                    <span style={{ fontSize: 11, color: "#64748b" }}>時間以上</span>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                            {!hasBreakOverride && (
-                              <div style={{ fontSize: 11, color: "#94a3b8" }}>
-                                店舗設定を使用中：正社員 {baseLocRule.breakMinutesFullTime}分 / {baseLocRule.breakThresholdMinutesFullTime / 60}時間以上、パート {baseLocRule.breakMinutesPartTime}分 / {baseLocRule.breakThresholdMinutesPartTime / 60}時間以上
-                              </div>
-                            )}
-                          </div>
+                      {/* 操作 */}
+                      <td style={{ padding: "10px 12px", textAlign: "right", whiteSpace: "nowrap" }}>
+                        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                          <button onClick={() => onRetire && onRetire(name)}
+                            style={{ border: "1px solid #fed7aa", background: "#fff7ed", color: "#c2410c", borderRadius: 7, padding: "5px 9px", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+                            退職
+                          </button>
+                          <button onClick={() => onRemove(name)}
+                            style={{ border: "1px solid #fee2e2", background: "#fff", color: "#dc2626", borderRadius: 7, padding: "5px 9px", fontSize: 11, cursor: "pointer" }}>
+                            🗑
+                          </button>
                         </div>
                       </td>
                     </tr>
-                  )}
-                </Fragment>
-              );
-            })}
-            {filtered.length === 0 && (
-              <tr><td colSpan={8} style={{ padding: 32, textAlign: "center", color: "#8b7355", fontSize: 13 }}>スタッフがいません</td></tr>
-            )}
-          </tbody>
-        </table>
+
+                    {/* 休憩展開パネル */}
+                    {isBreakExpanded && (
+                      <tr style={{ background: idx % 2 === 0 ? "#f8f8ff" : "#f3f3fb", borderBottom: "1px solid #f0ece4" }}>
+                        <td colSpan={10} style={{ padding: "0 12px 12px 48px" }}>
+                          <div style={{ border: "1px solid #e0e7ff", background: "#fff", borderRadius: 10, padding: "10px 14px", display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 12, fontWeight: 800, color: "#4338ca" }}>☕ 休憩（個別設定）</span>
+                            <select
+                              value={hasBreakOverride ? "individual" : "shared"}
+                              onChange={(e) => {
+                                if (e.target.value === "individual") {
+                                  onUpdateBreakOverride(name, {
+                                    breakMinutesFullTime: baseLocRule.breakMinutesFullTime,
+                                    breakThresholdMinutesFullTime: baseLocRule.breakThresholdMinutesFullTime,
+                                    breakMinutesPartTime: baseLocRule.breakMinutesPartTime,
+                                    breakThresholdMinutesPartTime: baseLocRule.breakThresholdMinutesPartTime,
+                                  });
+                                  setBreakHoursDraft((prev) => ({
+                                    ...prev,
+                                    [name]: {
+                                      ftH: String(baseLocRule.breakThresholdMinutesFullTime / 60),
+                                      ptH: String(baseLocRule.breakThresholdMinutesPartTime / 60),
+                                    },
+                                  }));
+                                } else {
+                                  onResetBreakOverride(name);
+                                  setBreakHoursDraft((prev) => { const n = { ...prev }; delete n[name]; return n; });
+                                }
+                              }}
+                              style={{ border: "1px solid #c7d2fe", borderRadius: 7, padding: "5px 8px", fontSize: 12, background: "#fff", cursor: "pointer" }}
+                            >
+                              <option value="shared">店舗共通</option>
+                              <option value="individual">個別設定</option>
+                            </select>
+                            {hasBreakOverride ? (
+                              <>
+                                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                  <span style={{ fontSize: 11, color: "#6b7280" }}>パート：</span>
+                                  <input type="number" min={0} max={120} value={breakRule.breakMinutesPartTime ?? baseLocRule.breakMinutesPartTime}
+                                    onChange={(e) => onUpdateBreakOverride(name, { breakMinutesPartTime: Math.max(0, Number(e.target.value) || 0) })}
+                                    style={{ width: 48, border: "1px solid #c7d2fe", borderRadius: 7, padding: "4px 6px", fontSize: 12, textAlign: "right" }} />
+                                  <span style={{ fontSize: 11, color: "#6b7280" }}>分 /</span>
+                                  <input type="number" min={0} max={24} step={0.5} value={ptHDisplay}
+                                    onChange={(e) => setBreakHoursDraft((prev) => ({ ...prev, [name]: { ...(prev[name] || {}), ptH: e.target.value } }))}
+                                    onBlur={() => onUpdateBreakOverride(name, { breakThresholdMinutesPartTime_h: Number(ptHDisplay) || 0 })}
+                                    style={{ width: 48, border: "1px solid #c7d2fe", borderRadius: 7, padding: "4px 6px", fontSize: 12, textAlign: "right" }} />
+                                  <span style={{ fontSize: 11, color: "#6b7280" }}>h以上</span>
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                  <span style={{ fontSize: 11, color: "#6b7280" }}>正社員：</span>
+                                  <input type="number" min={0} max={120} value={breakRule.breakMinutesFullTime ?? baseLocRule.breakMinutesFullTime}
+                                    onChange={(e) => onUpdateBreakOverride(name, { breakMinutesFullTime: Math.max(0, Number(e.target.value) || 0) })}
+                                    style={{ width: 48, border: "1px solid #c7d2fe", borderRadius: 7, padding: "4px 6px", fontSize: 12, textAlign: "right" }} />
+                                  <span style={{ fontSize: 11, color: "#6b7280" }}>分 /</span>
+                                  <input type="number" min={0} max={24} step={0.5} value={ftHDisplay}
+                                    onChange={(e) => setBreakHoursDraft((prev) => ({ ...prev, [name]: { ...(prev[name] || {}), ftH: e.target.value } }))}
+                                    onBlur={() => onUpdateBreakOverride(name, { breakThresholdMinutesFullTime_h: Number(ftHDisplay) || 0 })}
+                                    style={{ width: 48, border: "1px solid #c7d2fe", borderRadius: 7, padding: "4px 6px", fontSize: 12, textAlign: "right" }} />
+                                  <span style={{ fontSize: 11, color: "#6b7280" }}>h以上</span>
+                                </div>
+                              </>
+                            ) : (
+                              <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                                店舗共通：パート {baseLocRule.breakMinutesPartTime}分/{baseLocRule.breakThresholdMinutesPartTime / 60}h、正社員 {baseLocRule.breakMinutesFullTime}分/{baseLocRule.breakThresholdMinutesFullTime / 60}h
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+              {filtered.length === 0 && (
+                <tr><td colSpan={10} style={{ padding: 32, textAlign: "center", color: "#8b7355", fontSize: 13 }}>スタッフがいません</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -2780,13 +2825,48 @@ function RetiredStaffList({ retiredNames, retiredSettings, employeeLocation, emp
 
 // ─── 個人設定モーダル ─────────────────────────────────────────────────────────
 function IndividualSettingsModal({ name, year, month, fareSettings, fareConfig, extras,
-  onUpdateFare, onUpdateFareConfig, onUpdateExtras, onClose }) {
+  onUpdateFare, onUpdateFareConfig, onUpdateExtras, onClose,
+  // 追加props（全項目編集用）
+  paidLeaveSettings, employmentSettings, monthlySalarySettings,
+  contractStartByName, contractEndByName, prevAllData, getEffectiveRule,
+  onUpdatePaid, onUpdateEmployment, onUpdateMonthly,
+  onUpdateContractStart, onUpdateContractEnd,
+  // 休憩設定
+  employeeOverrides, workRulesByLocation, getLocationForName,
+  onUpdateBreakOverride, onResetBreakOverride }) {
 
-  const [tab, setTab]           = useState("fare");
+  const [tab, setTab]           = useState("basic");
   const [newLabel, setNewLabel] = useState("");
   const [newAmount, setNewAmount] = useState(""); // 文字列で管理し追加時に数値変換
   const [newPeriodKey, setNewPeriodKey] = useState(`${year}-${pad2(month)}`);
   const [addError, setAddError] = useState("");
+
+  // 前月平均から有給単価を自動計算
+  const prevPeriod = getPreviousPeriod(year, month);
+  const prevEntries = prevAllData?.[name] || {};
+  const effectiveRule = getEffectiveRule ? getEffectiveRule(name) : null;
+  const empType = normalizeEmployment(employmentSettings?.[name]);
+  const isFullTime = empType === "正社員";
+  const prevPeriodDays = getPeriodDays(prevPeriod.year, prevPeriod.month);
+  const prevSummary = effectiveRule
+    ? summarizeAttendanceMetrics(prevEntries, prevPeriodDays, effectiveRule, empType)
+    : null;
+  const prevAvgDailyMin = prevSummary?.avgDailyMin ?? 0;
+  const currentHourlyRate = paidLeaveSettings?.[name] ?? 0;
+  const suggestedPaidWage = effectiveRule && prevAvgDailyMin > 0
+    ? Math.round((prevAvgDailyMin / 60) * (effectiveRule.hourlyNormal || currentHourlyRate))
+    : null;
+
+  // 休憩設定
+  const loc = getLocationForName ? getLocationForName(name) : "";
+  const baseLocRule = sanitizeRule(workRulesByLocation?.[loc] || DEFAULT_WORK_RULE);
+  const hasBreakOverride = !!employeeOverrides?.[name]?.breakRule;
+  const breakRule = employeeOverrides?.[name]?.breakRule || {};
+  // 雇用区分に応じたデフォルト休憩値を表示
+  const breakMinKey   = isFullTime ? "breakMinutesFullTime"          : "breakMinutesPartTime";
+  const breakThresKey = isFullTime ? "breakThresholdMinutesFullTime" : "breakThresholdMinutesPartTime";
+  const currentBreakMin   = hasBreakOverride ? (breakRule[breakMinKey]   ?? baseLocRule[breakMinKey])   : baseLocRule[breakMinKey];
+  const currentBreakThres = hasBreakOverride ? (breakRule[breakThresKey] ?? baseLocRule[breakThresKey]) : baseLocRule[breakThresKey];
 
   const config     = fareConfig[name] || { type: "daily" };
   const nameExtras = extras[name] || [];
@@ -2846,16 +2926,257 @@ function IndividualSettingsModal({ name, year, month, fareSettings, fareConfig, 
         </div>
 
         {/* タブ */}
-        <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-          {[["fare", "🚃 交通費"], ["extras", "💴 臨時支給"]].map(([key, label]) => (
+        <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+          {[["basic", "👤 基本設定"], ["worktime", "🕐 勤務時間"], ["break", "☕ 休憩"], ["fare", "🚃 交通費"], ["extras", "💴 臨時支給"]].map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)} style={{
-              padding: "8px 18px", fontSize: 12, fontWeight: 800, borderRadius: 10, cursor: "pointer",
+              padding: "8px 14px", fontSize: 12, fontWeight: 800, borderRadius: 10, cursor: "pointer",
               border: tab === key ? "2px solid #1a2e1a" : "1px solid #ddd5c8",
               background: tab === key ? "#1a2e1a" : "#fff",
               color: tab === key ? "#e8f5e8" : "#374151",
             }}>{label}</button>
           ))}
         </div>
+
+        {/* ─── 基本設定タブ ─── */}
+        {tab === "basic" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+            {/* 雇用区分 */}
+            <div style={{ background: "#fafaf8", border: "1px solid #eee2d8", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#6b7280", marginBottom: 10 }}>雇用区分</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {EMPLOYMENT_TYPES.map((t) => (
+                  <button key={t} onClick={() => onUpdateEmployment && onUpdateEmployment(name, t)} style={{
+                    flex: 1, padding: "10px", fontSize: 13, fontWeight: 800, borderRadius: 10, cursor: "pointer",
+                    border: empType === t ? "2px solid #1a4d12" : "1px solid #ddd5c8",
+                    background: empType === t ? "#f0fdf4" : "#fff",
+                    color: empType === t ? "#1a4d12" : "#6b7280",
+                  }}>{t}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* 月給（正社員のみ） */}
+            {isFullTime && (
+              <div style={{ background: "#fafaf8", border: "1px solid #eee2d8", borderRadius: 10, padding: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#6b7280", marginBottom: 10 }}>月給</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ color: "#6b7280" }}>¥</span>
+                  <input type="number" min={0} step={1000}
+                    value={monthlySalarySettings?.[name] ?? 0}
+                    onChange={e => onUpdateMonthly && onUpdateMonthly(name, +e.target.value)}
+                    style={{ ...S.inp, width: 130, textAlign: "right", fontSize: 15, fontWeight: 700 }} />
+                  <span style={{ fontSize: 12, color: "#9ca3af" }}>/月</span>
+                </div>
+              </div>
+            )}
+
+            {/* 時給（パートのみ） */}
+            {!isFullTime && (
+              <div style={{ background: "#fafaf8", border: "1px solid #eee2d8", borderRadius: 10, padding: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#6b7280", marginBottom: 10 }}>時給</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ color: "#6b7280" }}>¥</span>
+                  <input type="number" min={0} step={10}
+                    value={paidLeaveSettings?.[name] ?? 0}
+                    onChange={e => onUpdatePaid && onUpdatePaid(name, +e.target.value)}
+                    style={{ ...S.inp, width: 110, textAlign: "right", fontSize: 15, fontWeight: 700 }} />
+                  <span style={{ fontSize: 12, color: "#9ca3af" }}>/時間</span>
+                </div>
+              </div>
+            )}
+
+            {/* 有給単価（パートのみ・前月平均から自動計算） */}
+            {!isFullTime && (
+              <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 10, padding: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#166534", marginBottom: 6 }}>🌿 有給単価（1日あたりの有給賃金）</div>
+                <div style={{ fontSize: 11, color: "#4b5563", marginBottom: 10 }}>
+                  前月平均: {prevSummary && prevAvgDailyMin > 0
+                    ? `${Math.floor(prevAvgDailyMin / 60)}時間${prevAvgDailyMin % 60 > 0 ? Math.round(prevAvgDailyMin % 60) + "分" : ""} / 日`
+                    : "データなし"}
+                  {suggestedPaidWage != null && (
+                    <span style={{ marginLeft: 8, fontWeight: 700, color: "#166534" }}>→ 推奨: ¥{suggestedPaidWage.toLocaleString()}</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ color: "#6b7280" }}>¥</span>
+                  <input type="number" min={0} step={100}
+                    value={paidLeaveSettings?.[name] ?? 0}
+                    onChange={e => onUpdatePaid && onUpdatePaid(name, +e.target.value)}
+                    style={{ ...S.inp, width: 110, textAlign: "right", fontSize: 15, fontWeight: 700 }} />
+                  <span style={{ fontSize: 12, color: "#9ca3af" }}>/日（有給使用時）</span>
+                  {suggestedPaidWage != null && (
+                    <button onClick={() => onUpdatePaid && onUpdatePaid(name, suggestedPaidWage)}
+                      style={{ background: "#166534", color: "#fff", border: "none", borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+                      前月平均を適用
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6 }}>
+                  ※ 有給使用日はこの金額が給与に加算されます。空白（0）の場合は時給×前月平均勤務時間で自動計算します。
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* ─── 勤務時間タブ ─── */}
+        {tab === "worktime" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+            {/* 契約開始時刻 */}
+            <div style={{ background: "#fafaf8", border: "1px solid #eee2d8", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#6b7280", marginBottom: 4 }}>契約開始時刻（例: 09:00, 10:00）</div>
+              <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 10 }}>
+                この時刻を契約上の出勤時刻とします。30分以内の早着は自動的にこの時刻に丸めます。
+              </div>
+              <input type="time"
+                value={contractStartByName?.[name] || ""}
+                onChange={e => onUpdateContractStart && onUpdateContractStart(name, e.target.value || "")}
+                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 10px", fontSize: 15, fontWeight: 700, background: "#fff", width: 130 }}
+              />
+              {contractStartByName?.[name] && (
+                <button onClick={() => onUpdateContractStart && onUpdateContractStart(name, "")}
+                  style={{ marginLeft: 10, fontSize: 11, color: "#dc2626", background: "none", border: "1px solid #fca5a5", borderRadius: 6, padding: "4px 8px", cursor: "pointer" }}>
+                  クリア
+                </button>
+              )}
+            </div>
+
+            {/* 契約終了時刻 */}
+            <div style={{ background: "#fafaf8", border: "1px solid #eee2d8", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#6b7280", marginBottom: 4 }}>契約終了時刻（例: 17:00, 18:30）</div>
+              <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 10 }}>
+                この時刻以降の勤務はこの時刻に丸めます。残業計算の基準にもなります。
+              </div>
+              <input type="time"
+                value={contractEndByName?.[name] || ""}
+                onChange={e => onUpdateContractEnd && onUpdateContractEnd(name, e.target.value || "")}
+                style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 10px", fontSize: 15, fontWeight: 700, background: "#fff", width: 130 }}
+              />
+              {contractEndByName?.[name] && (
+                <button onClick={() => onUpdateContractEnd && onUpdateContractEnd(name, "")}
+                  style={{ marginLeft: 10, fontSize: 11, color: "#dc2626", background: "none", border: "1px solid #fca5a5", borderRadius: 6, padding: "4px 8px", cursor: "pointer" }}>
+                  クリア
+                </button>
+              )}
+            </div>
+
+            {/* 現在の設定まとめ */}
+            <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 10, padding: 14, fontSize: 12, color: "#1e40af" }}>
+              <b>現在の設定:</b>{" "}
+              {contractStartByName?.[name] ? `出勤 ${contractStartByName[name]}` : "出勤時刻: 店舗共通"}{" ／ "}
+              {contractEndByName?.[name] ? `退勤 ${contractEndByName[name]}` : "退勤時刻: 店舗共通"}
+            </div>
+
+          </div>
+        )}
+
+        {/* ─── 休憩設定タブ ─── */}
+        {tab === "break" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+            {/* 店舗共通 / 個別切り替え */}
+            <div style={{ display: "flex", gap: 8 }}>
+              {[["shared", "🏪 店舗共通"], ["individual", "👤 個別設定"]].map(([v, label]) => (
+                <button key={v} onClick={() => {
+                  if (v === "individual" && !hasBreakOverride) {
+                    onUpdateBreakOverride && onUpdateBreakOverride(name, {
+                      breakMinutesFullTime: baseLocRule.breakMinutesFullTime,
+                      breakThresholdMinutesFullTime: baseLocRule.breakThresholdMinutesFullTime,
+                      breakMinutesPartTime: baseLocRule.breakMinutesPartTime,
+                      breakThresholdMinutesPartTime: baseLocRule.breakThresholdMinutesPartTime,
+                    });
+                  } else if (v === "shared") {
+                    onResetBreakOverride && onResetBreakOverride(name);
+                  }
+                }} style={{
+                  flex: 1, padding: "10px", fontSize: 13, fontWeight: 800, borderRadius: 10, cursor: "pointer",
+                  border: (hasBreakOverride ? v === "individual" : v === "shared") ? "2px solid #1a4d12" : "1px solid #ddd5c8",
+                  background: (hasBreakOverride ? v === "individual" : v === "shared") ? "#f0fdf4" : "#fff",
+                  color: (hasBreakOverride ? v === "individual" : v === "shared") ? "#1a4d12" : "#6b7280",
+                }}>{label}</button>
+              ))}
+            </div>
+
+            {/* 店舗共通の場合：現在の設定を表示 */}
+            {!hasBreakOverride && (
+              <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 16, color: "#475569", fontSize: 13 }}>
+                <div style={{ fontWeight: 800, marginBottom: 8, color: "#334155" }}>現在の店舗設定（{loc}）</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div>正社員：{baseLocRule.breakThresholdMinutesFullTime / 60}時間以上で <b>{baseLocRule.breakMinutesFullTime}分</b>休憩</div>
+                  <div>パート：{baseLocRule.breakThresholdMinutesPartTime / 60}時間以上で <b>{baseLocRule.breakMinutesPartTime}分</b>休憩</div>
+                </div>
+              </div>
+            )}
+
+            {/* 個別設定の場合：シンプルな入力UI */}
+            {hasBreakOverride && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+                {/* わかりやすい説明 */}
+                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "#92400e" }}>
+                  ○時間以上勤務したら○分の休憩を自動で差し引きます。{name}さん専用の設定です。
+                </div>
+
+                {/* 正社員設定 */}
+                <div style={{ background: "#fafaf8", border: "1px solid #eee2d8", borderRadius: 10, padding: 14 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "#6b7280", marginBottom: 10 }}>
+                    正社員として勤務する場合
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <input type="number" min={0} max={24} step={0.5}
+                      defaultValue={(breakRule.breakThresholdMinutesFullTime ?? baseLocRule.breakThresholdMinutesFullTime) / 60}
+                      onBlur={(e) => onUpdateBreakOverride && onUpdateBreakOverride(name, {
+                        breakThresholdMinutesFullTime_h: Number(e.target.value) || 0,
+                      })}
+                      style={{ width: 64, border: "1px solid #cbd5e1", borderRadius: 8, padding: "7px 8px", fontSize: 14, fontWeight: 700, textAlign: "center", outline: "none" }} />
+                    <span style={{ fontSize: 13, color: "#374151" }}>時間以上勤務したら</span>
+                    <input type="number" min={0} max={120} step={5}
+                      value={breakRule.breakMinutesFullTime ?? baseLocRule.breakMinutesFullTime}
+                      onChange={(e) => onUpdateBreakOverride && onUpdateBreakOverride(name, {
+                        breakMinutesFullTime: Math.max(0, Number(e.target.value) || 0),
+                      })}
+                      style={{ width: 64, border: "1px solid #cbd5e1", borderRadius: 8, padding: "7px 8px", fontSize: 14, fontWeight: 700, textAlign: "center", outline: "none" }} />
+                    <span style={{ fontSize: 13, color: "#374151" }}>分休憩</span>
+                  </div>
+                </div>
+
+                {/* パート設定 */}
+                <div style={{ background: "#fafaf8", border: "1px solid #eee2d8", borderRadius: 10, padding: 14 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "#6b7280", marginBottom: 10 }}>
+                    パートとして勤務する場合
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <input type="number" min={0} max={24} step={0.5}
+                      defaultValue={(breakRule.breakThresholdMinutesPartTime ?? baseLocRule.breakThresholdMinutesPartTime) / 60}
+                      onBlur={(e) => onUpdateBreakOverride && onUpdateBreakOverride(name, {
+                        breakThresholdMinutesPartTime_h: Number(e.target.value) || 0,
+                      })}
+                      style={{ width: 64, border: "1px solid #cbd5e1", borderRadius: 8, padding: "7px 8px", fontSize: 14, fontWeight: 700, textAlign: "center", outline: "none" }} />
+                    <span style={{ fontSize: 13, color: "#374151" }}>時間以上勤務したら</span>
+                    <input type="number" min={0} max={120} step={5}
+                      value={breakRule.breakMinutesPartTime ?? baseLocRule.breakMinutesPartTime}
+                      onChange={(e) => onUpdateBreakOverride && onUpdateBreakOverride(name, {
+                        breakMinutesPartTime: Math.max(0, Number(e.target.value) || 0),
+                      })}
+                      style={{ width: 64, border: "1px solid #cbd5e1", borderRadius: 8, padding: "7px 8px", fontSize: 14, fontWeight: 700, textAlign: "center", outline: "none" }} />
+                    <span style={{ fontSize: 13, color: "#374151" }}>分休憩</span>
+                  </div>
+                </div>
+
+                {/* 現在の要約 */}
+                <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#166534" }}>
+                  <b>{name}さんの設定:</b>{" "}
+                  {empType}の場合 — {currentBreakThres / 60}時間以上で <b>{currentBreakMin}分</b>休憩
+                </div>
+
+              </div>
+            )}
+
+          </div>
+        )}
 
         {/* ─── 交通費タブ ─── */}
         {tab === "fare" && (
@@ -3215,9 +3536,6 @@ function WorkRulePanel({ workRule, onUpdate }) {
   const ftH = r.breakThresholdMinutesFullTime / 60;
   const ptH = r.breakThresholdMinutesPartTime / 60;
 
-  // snapRangeStart === snapRangeEnd のとき「無効」扱い（削除で "00:00","00:00","00:00" にする）
-  const rangeSnapEnabled = r.snapRangeStart !== r.snapRangeEnd;
-
   const Field = ({ label, children }) => (
     <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11 }}>
       <span style={{ color: "#6b7280", fontWeight: 700 }}>{label}</span>
@@ -3227,6 +3545,11 @@ function WorkRulePanel({ workRule, onUpdate }) {
   const timeInput = (val, key) => (
     <input type="time" value={val}
       onChange={(e) => onUpdate({ [key]: e.target.value })}
+      style={{ border: "1px solid #c9d6c8", borderRadius: 6, padding: "5px 7px", fontSize: 12, background: "#fff", width: 108 }} />
+  );
+  const startRoundInput = (val) => (
+    <input type="time" value={val}
+      onChange={(e) => onUpdate({ snapEarlyThreshold: e.target.value, snapEarlyTo: e.target.value })}
       style={{ border: "1px solid #c9d6c8", borderRadius: 6, padding: "5px 7px", fontSize: 12, background: "#fff", width: 108 }} />
   );
   const numInput = (val, key, unit = "", w = 80, step = 1) => (
@@ -3250,43 +3573,12 @@ function WorkRulePanel({ workRule, onUpdate }) {
         </div>
       </div>
 
-      {/* スナップ設定 */}
+      {/* 丸め */}
       <div>
-        <div style={S.sectionLabel}>⚡ スナップ設定（早出・打刻丸め）</div>
-        <div style={{ display: "grid", gap: 10 }}>
-          {/* 早朝スナップ（常時表示） */}
-          <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px" }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "#334155", marginBottom: 6 }}>【早朝スナップ】この時刻より前に来た場合</div>
-            <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-              <Field label="〇〇時前に来たら">{timeInput(r.snapEarlyThreshold, "snapEarlyThreshold")}</Field>
-              <Field label="この時刻に丸める">{timeInput(r.snapEarlyTo, "snapEarlyTo")}</Field>
-            </div>
-          </div>
-
-          {/* 範囲スナップ（任意追加） */}
-          {rangeSnapEnabled ? (
-            <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ fontSize: 11, fontWeight: 700, color: "#334155" }}>【範囲スナップ】この時間帯に来た場合</span>
-                <button
-                  onClick={() => onUpdate({ snapRangeStart: "00:00", snapRangeEnd: "00:00", snapRangeTo: "00:00" })}
-                  style={{ fontSize: 11, border: "1px solid #fca5a5", background: "#fff", color: "#dc2626", borderRadius: 6, padding: "2px 10px", cursor: "pointer", fontWeight: 700 }}
-                >削除</button>
-              </div>
-              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                <Field label="範囲 開始">{timeInput(r.snapRangeStart, "snapRangeStart")}</Field>
-                <Field label="範囲 終了">{timeInput(r.snapRangeEnd, "snapRangeEnd")}</Field>
-                <Field label="この時刻に丸める">{timeInput(r.snapRangeTo, "snapRangeTo")}</Field>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => onUpdate({ snapRangeStart: "14:00", snapRangeEnd: "15:00", snapRangeTo: "15:00" })}
-              style={{ display: "flex", alignItems: "center", gap: 6, border: "1px dashed #c9d6c8", background: "#f8fafc", color: "#4b5563", borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700, width: "fit-content" }}
-            >
-              <span style={{ fontSize: 15 }}>＋</span> 範囲スナップを追加
-            </button>
-          )}
+        <div style={S.sectionLabel}>⏱ 丸め設定</div>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <Field label="開始丸め">{startRoundInput(r.snapEarlyThreshold || r.businessStart)}</Field>
+          <Field label="終了丸め">{timeInput(r.businessEnd, "businessEnd")}</Field>
         </div>
       </div>
 
@@ -3367,12 +3659,33 @@ export default function App() {
   const [, setBentoStorageOnly] = useState(false);
   const [retiredSettings, setRetiredSettings] = useState({}); // { name: { isRetired, retiredAt } }
   const [registeredNames, setRegisteredNames] = useState([]); // employee_settings 全登録名
+  // れこるCSV取込後に出勤なしのスタッフをチェックするダイアログ
+  // { names: string[], idx: number, decisions: { [name]: 'retire' | 'absent' } }
+  const [missingStaffDialog, setMissingStaffDialog] = useState(null);
+  // シフトパターン設定（店舗ごとにUIから編集可能）
+  const [shiftRulesByLocation, setShiftRulesByLocation] = useState(() => {
+    const initial = loadShiftRulesByLocationFromStorage();
+    syncShiftRulesByLocation(initial);
+    return initial;
+  });
+  const shiftRules = useMemo(
+    () => shiftRulesByLocation[activeLocation] || cloneShiftRules(DEFAULT_TORIKOKO_SHIFT_RULES),
+    [shiftRulesByLocation, activeLocation]
+  );
+  // モジュールレベル変数と同期（ユーティリティ関数から参照）
+  useEffect(() => {
+    syncShiftRulesByLocation(shiftRulesByLocation);
+  }, [shiftRulesByLocation]);
   const fileRef = useRef();
   const bentoFileRef = useRef();
+  const toastTimerRef = useRef(null);
 
   const showToast = (msg, type = "ok") => {
-    setToast({ msg, type }); setTimeout(() => setToast(null), 3500);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ msg, type });
+    toastTimerRef.current = setTimeout(() => { setToast(null); toastTimerRef.current = null; }, 3500);
   };
+  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
   const saveStamp = () => {
     const now = new Date();
     return `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
@@ -3405,19 +3718,12 @@ export default function App() {
       .filter((n) => !retiredSettings[n]?.isRetired)
       .sort((a, b) => a.localeCompare(b, "ja"));
   }, [allData, registeredNames, retiredSettings]);
-  const retiredNames = useMemo(() => Object.keys(allData)
-    .filter((n) => retiredSettings[n]?.isRetired)
-    .sort((a, b) => a.localeCompare(b, "ja")), [allData, retiredSettings]);
-
-  // 退職者のうち、選択中の期間に在籍していた人（退職日 >= 期間開始）
-  const retiredInPeriod = useMemo(() => {
-    const { start } = getPeriodRange(year, month);
-    return retiredNames.filter((n) => {
-      const retiredAt = retiredSettings[n]?.retiredAt;
-      if (!retiredAt) return false; // 退職日不明は除外
-      return retiredAt >= start; // 退職日が期間開始以降 → 期間中に在籍
-    });
-  }, [retiredNames, retiredSettings, year, month]);
+  const retiredNames = useMemo(() => {
+    const combined = new Set([...Object.keys(allData), ...registeredNames]);
+    return Array.from(combined)
+      .filter((n) => retiredSettings[n]?.isRetired)
+      .sort((a, b) => a.localeCompare(b, "ja"));
+  }, [allData, registeredNames, retiredSettings]);
 
   const exportableNames = useMemo(() => {
     const { start } = getPeriodRange(year, month);
@@ -3438,28 +3744,22 @@ export default function App() {
       })
       .sort((a, b) => a.localeCompare(b, "ja"));
   }, [allData, fareSettings, paidLeaveSettings, monthlySalarySettings, employmentSettings, employeeLocation, retiredSettings, year, month]);
-  // 表示中の期間に在籍しているスタッフ（現役 + 期間内退職者）の中から、店舗で絞り込む
-  const namesForPeriod = useMemo(() => {
-    const active = allNames; // 現役
-    const combined = [...active, ...retiredInPeriod];
-    return combined.sort((a, b) => a.localeCompare(b, "ja"));
-  }, [allNames, retiredInPeriod]);
-
+  // 店舗別の画面表示は現役スタッフだけにする。退職者は退職者一覧でのみ表示する。
   const names = useMemo(() =>
-    namesForPeriod.filter((n) => {
+    allNames.filter((n) => {
       const loc = normalizeLocation(employeeLocation[n]);
       // 所属店舗未設定の場合は DEFAULT_WORK_RULE.locationName（とりここ）に属する扱い
       const effective = loc || DEFAULT_WORK_RULE.locationName;
       return effective === activeLocation;
     }),
-    [namesForPeriod, employeeLocation, activeLocation]
+    [allNames, employeeLocation, activeLocation]
   );
   const storeScopedNames = useMemo(() =>
-    exportableNames.filter((n) => {
+    allNames.filter((n) => {
       const loc = normalizeLocation(employeeLocation[n]) || DEFAULT_WORK_RULE.locationName;
       return loc === activeLocation;
     }),
-    [exportableNames, employeeLocation, activeLocation]
+    [allNames, employeeLocation, activeLocation]
   );
 
   const getLocationForName = useCallback((name) => {
@@ -3487,6 +3787,7 @@ export default function App() {
     }
 
     // 始め設定・終了設定の丸めは設定モードに関わらず個別指定できる。
+    // _contractSnapFixed フラグを立てることでシフト自動検出による上書きを防ぐ。
     const contractStart = contractStartByName[name];
     if (contractStart) {
       rule = {
@@ -3496,14 +3797,15 @@ export default function App() {
           snapEarlyTo: contractStart,
         }),
         startRoundWindowMinutes: 30,
+        _contractSnapFixed: true,
       };
     }
     const contractEnd = contractEndByName[name];
     if (contractEnd) {
-      rule = sanitizeRule({
-        ...rule,
-        businessEnd: contractEnd,
-      });
+      rule = {
+        ...sanitizeRule({ ...rule, businessEnd: contractEnd }),
+        _contractEndFixed: true,
+      };
     }
 
     // 給料単価（個別時給）が設定されていればhourlyNormalを上書き（正社員は月給制なので対象外）
@@ -3559,25 +3861,19 @@ export default function App() {
     }).length;
   }, [activeName, allData, year, month]);
   const updateEmployeeOverrideRule = useCallback(async (name, patch) => {
-    let nextOverride = null;
-    setEmployeeOverrides((prev) => {
-      const loc = getLocationForName(name);
-      const base = sanitizeRule(workRulesByLocation[loc] || { ...DEFAULT_WORK_RULE, locationName: loc });
-      const current = sanitizeRule({ ...base, ...(prev[name]?.rule || {}), locationName: base.locationName });
-      const converted = { ...patch };
-      if ("breakThresholdMinutesFullTime_h" in patch) converted.breakThresholdMinutesFullTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesFullTime_h) || 0) * 60));
-      if ("breakThresholdMinutesPartTime_h" in patch) converted.breakThresholdMinutesPartTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesPartTime_h) || 0) * 60));
-      delete converted.breakThresholdMinutesFullTime_h;
-      delete converted.breakThresholdMinutesPartTime_h;
-      nextOverride = {
-        enabled: true,
-        rule: sanitizeRule({ ...current, ...converted, locationName: base.locationName }),
-      };
-      return {
-        ...prev,
-        [name]: nextOverride,
-      };
-    });
+    const loc = getLocationForName(name);
+    const base = sanitizeRule(workRulesByLocation[loc] || { ...DEFAULT_WORK_RULE, locationName: loc });
+    const current = sanitizeRule({ ...base, ...(employeeOverrides[name]?.rule || {}), locationName: base.locationName });
+    const converted = { ...patch };
+    if ("breakThresholdMinutesFullTime_h" in patch) converted.breakThresholdMinutesFullTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesFullTime_h) || 0) * 60));
+    if ("breakThresholdMinutesPartTime_h" in patch) converted.breakThresholdMinutesPartTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesPartTime_h) || 0) * 60));
+    delete converted.breakThresholdMinutesFullTime_h;
+    delete converted.breakThresholdMinutesPartTime_h;
+    const nextOverride = {
+      enabled: true,
+      rule: sanitizeRule({ ...current, ...converted, locationName: base.locationName }),
+    };
+    setEmployeeOverrides((prev) => ({ ...prev, [name]: nextOverride }));
     if (!user) return;
     try {
       await dbUpsertSettings(
@@ -3592,7 +3888,7 @@ export default function App() {
     } catch (e) {
       showToast(`保存エラー: ${e.message}`, "err");
     }
-  }, [user, getLocationForName, workRulesByLocation, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
+  }, [user, getLocationForName, workRulesByLocation, employeeOverrides, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
   const resetEmployeeOverrideRule = useCallback(async (name) => {
     setEmployeeOverrides((prev) => {
       const next = { ...prev };
@@ -3616,19 +3912,16 @@ export default function App() {
   }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
 
   const updateBreakOverride = useCallback(async (name, patch) => {
-    let nextOverride = null;
-    setEmployeeOverrides((prev) => {
-      const current = prev[name] || {};
-      const converted = { ...patch };
-      if ("breakThresholdMinutesFullTime_h" in patch)
-        converted.breakThresholdMinutesFullTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesFullTime_h) || 0) * 60));
-      if ("breakThresholdMinutesPartTime_h" in patch)
-        converted.breakThresholdMinutesPartTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesPartTime_h) || 0) * 60));
-      delete converted.breakThresholdMinutesFullTime_h;
-      delete converted.breakThresholdMinutesPartTime_h;
-      nextOverride = { ...current, breakRule: { ...(current.breakRule || {}), ...converted } };
-      return { ...prev, [name]: nextOverride };
-    });
+    const current = employeeOverrides[name] || {};
+    const converted = { ...patch };
+    if ("breakThresholdMinutesFullTime_h" in patch)
+      converted.breakThresholdMinutesFullTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesFullTime_h) || 0) * 60));
+    if ("breakThresholdMinutesPartTime_h" in patch)
+      converted.breakThresholdMinutesPartTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesPartTime_h) || 0) * 60));
+    delete converted.breakThresholdMinutesFullTime_h;
+    delete converted.breakThresholdMinutesPartTime_h;
+    const nextOverride = { ...current, breakRule: { ...(current.breakRule || {}), ...converted } };
+    setEmployeeOverrides((prev) => ({ ...prev, [name]: nextOverride }));
     if (!user) return;
     try {
       await dbUpsertSettings(
@@ -3639,7 +3932,7 @@ export default function App() {
         buildEmployeeSettingOptions(name, { overrideRule: nextOverride })
       );
     } catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
-  }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
+  }, [user, employeeOverrides, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
 
   const resetBreakOverride = useCallback(async (name) => {
     let nextOverrideForSave = null;
@@ -3952,8 +4245,12 @@ export default function App() {
         if (bentoResult.error && !isMissingRelationErr(bentoResult.error, "bento_checks")) {
           showToast(`お弁当保存読込エラー: ${bentoResult.error.message}`, "err");
         }
-        const first = Object.keys(mergedAttendance)[0] || (st.registeredNames || [])[0] || Object.keys(st.fare)[0] || "";
-        setActiveName((prev) => prev || first);
+        const firstActiveName = [
+          ...Object.keys(mergedAttendance || {}),
+          ...(st.registeredNames || []),
+          ...Object.keys(st.fare || {}),
+        ].find((name) => name && !st.retired?.[name]?.isRetired) || "";
+        setActiveName((prev) => (prev && !st.retired?.[prev]?.isRetired) ? prev : firstActiveName);
         attendanceShiftLoadedRef.current = true;
       } catch (e) {
         if (alive) showToast(`読込エラー: ${e.message}`, "err");
@@ -3968,11 +4265,11 @@ export default function App() {
   useEffect(() => {
     setActiveName((prev) => {
       const getAssignedLocation = (name) => normalizeLocation(employeeLocation[name]) || DEFAULT_WORK_RULE.locationName;
-      if (prev && getAssignedLocation(prev) === activeLocation) return prev;
+      if (prev && !retiredSettings[prev]?.isRetired && getAssignedLocation(prev) === activeLocation) return prev;
       const firstOfLocation = allNames.find((name) => getAssignedLocation(name) === activeLocation);
       return firstOfLocation || "";
     });
-  }, [activeLocation, allNames, employeeLocation]);
+  }, [activeLocation, allNames, employeeLocation, retiredSettings]);
 
   const logout = async () => {
     await supabase.auth.signOut();
@@ -3985,6 +4282,7 @@ export default function App() {
     setBentoChecksByName({}); setBentoStorageOnly(false);
     setBentoPriceByLocation({ [LEGACY_SHARED_BENTO_PRICE_KEY]: DEFAULT_BENTO_PRICE_PER_MEAL }); setSaveBusy(false); setLastSavedAt("");
     setWorkRulesByLocation(defaultRulesMap());
+    setShiftRulesByLocation(loadShiftRulesByLocationFromStorage());
   };
 
   // ── 店舗ルール操作 ──
@@ -3999,6 +4297,18 @@ export default function App() {
       converted.breakThresholdMinutesPartTime = Math.max(0, Math.round((Number(patch.breakThresholdMinutesPartTime_h) || 0) * 60));
     delete converted.breakThresholdMinutesFullTime_h;
     delete converted.breakThresholdMinutesPartTime_h;
+
+    if ("businessStart" in patch && !("snapEarlyThreshold" in patch) && !("snapEarlyTo" in patch)) {
+      const canFollowBusinessStart =
+        current.snapEarlyThreshold === current.businessStart ||
+        current.snapEarlyThreshold === DEFAULT_WORK_RULE.snapEarlyThreshold;
+      const canSnapToBusinessStart =
+        current.snapEarlyTo === current.businessStart ||
+        current.snapEarlyTo === current.businessEnd ||
+        current.snapEarlyTo === DEFAULT_WORK_RULE.snapEarlyTo;
+      if (canFollowBusinessStart) converted.snapEarlyThreshold = patch.businessStart;
+      if (canSnapToBusinessStart) converted.snapEarlyTo = patch.businessStart;
+    }
 
     const next = sanitizeRule({ ...current, ...converted, locationName: activeLocation });
     setWorkRulesByLocation((prev) => ({ ...prev, [activeLocation]: next }));
@@ -4027,9 +4337,14 @@ export default function App() {
     }
     const next = sanitizeRule({ ...activeWorkRule, locationName: loc });
     setWorkRulesByLocation((prev) => ({ ...prev, [loc]: next }));
+    setShiftRulesByLocation((prev) => {
+      const nextMap = { ...prev, [loc]: cloneShiftRules(shiftRules) };
+      saveShiftRulesByLocationToStorage(nextMap);
+      return nextMap;
+    });
     setActiveLocation(loc);
     try { await dbUpsertWorkRule(user.id, next); } catch (e) { showToast(`店舗追加エラー: ${e.message}`, "err"); }
-  }, [user, workRulesByLocation, activeWorkRule]);
+  }, [user, workRulesByLocation, activeWorkRule, shiftRules]);
 
   const removeLocation = useCallback(async () => {
     if (!user) return;
@@ -4043,6 +4358,12 @@ export default function App() {
     setRuleModeByLocation((prev) => {
       const updated = { ...prev };
       delete updated[activeLocation];
+      return updated;
+    });
+    setShiftRulesByLocation((prev) => {
+      const updated = { ...prev };
+      delete updated[activeLocation];
+      saveShiftRulesByLocationToStorage(updated);
       return updated;
     });
     setEmployeeLocation((prev) => {
@@ -4357,13 +4678,13 @@ export default function App() {
     reader.readAsArrayBuffer(file); e.target.value = "";
   };
 
-  // ── お弁当Excel読み込み（XLSX/XLSM, 店舗自動判定） ──
+  // ── お弁当Excel読み込み（XLSX/XLSM, 店舗自動判定・施設別単価対応） ──
   const onBentoFile = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
     reader.onload = async (ev) => {
       try {
-        const { byName, locationByName, pricePerMeal, facilityRaw, usedSheet, usedSheets } = parseBentoXLSX(ev.target.result, year, month);
+        const { byName, locationByName, pricePerMeal, priceByFacility, facilityRaw, usedSheet, usedSheets } = parseBentoXLSX(ev.target.result, year, month);
         const importedNames = Object.keys(byName || {});
         if (!importedNames.length) { showToast("お弁当データが見つかりませんでした", "err"); return; }
         const { start: periodStart, end: periodEnd } = getPeriodRange(year, month);
@@ -4375,11 +4696,16 @@ export default function App() {
         const resolvedLocByName = {};
         importedNames.forEach((rawName) => {
           const resolvedName = existingNameMap.get(normalizePersonName(rawName)) || rawName;
+          const rawFacility = locationByName?.[rawName] || "";
           const resolvedLocation =
-            detectLocationFromFacility(locationByName?.[rawName], locationNames)
+            detectLocationFromFacility(rawFacility, locationNames)
             || normalizeLocation(employeeLocation[resolvedName])
             || activeLocation;
-          const resolvedPrice = Math.max(0, Number(pricePerMeal) || getBentoPriceForLocation(resolvedLocation));
+
+          // 施設別単価を優先、なければ全体単価、なければアプリ設定の単価
+          const facilityPrice = rawFacility ? (priceByFacility[rawFacility] || 0) : 0;
+          const resolvedPrice = Math.max(0, facilityPrice || Number(pricePerMeal) || getBentoPriceForLocation(resolvedLocation));
+
           const periodFiltered = {};
           Object.entries(byName[rawName] || {}).forEach(([dateStr, checked]) => {
             if (!checked) return;
@@ -4387,8 +4713,7 @@ export default function App() {
           });
           if (!Object.keys(periodFiltered).length) return;
           resolvedByName[resolvedName] = { ...(resolvedByName[resolvedName] || {}), ...periodFiltered };
-          const rawLoc = locationByName?.[rawName];
-          if (rawLoc && !resolvedLocByName[resolvedName]) resolvedLocByName[resolvedName] = rawLoc;
+          if (rawFacility && !resolvedLocByName[resolvedName]) resolvedLocByName[resolvedName] = rawFacility;
         });
 
         const targetNames = Object.keys(resolvedByName);
@@ -4397,20 +4722,18 @@ export default function App() {
           return;
         }
 
+        // ── BUG4/11修正: mergedBentoChecksをsetState外で計算 ──
+        const currentBentoChecks = bentoChecksByName; // 現在のstateを直接参照（useCallbackのdepsに含める）
+        const mergedBentoChecks = { ...currentBentoChecks };
         const importOps = [];
-        let mergedBentoChecks = {};
-        setBentoChecksByName((prev) => {
-          const next = { ...prev };
-          targetNames.forEach((name) => {
-            next[name] = { ...(next[name] || {}), ...(resolvedByName[name] || {}) };
-            Object.keys(resolvedByName[name] || {}).forEach((dateStr) => {
-              importOps.push({ name, dateStr });
-            });
+        targetNames.forEach((name) => {
+          mergedBentoChecks[name] = { ...(mergedBentoChecks[name] || {}), ...(resolvedByName[name] || {}) };
+          Object.keys(resolvedByName[name] || {}).forEach((dateStr) => {
+            importOps.push({ name, dateStr });
           });
-          mergedBentoChecks = next;
-          replaceBentoChecksPeriodInStorage(user?.id, next, year, month);
-          return next;
         });
+        setBentoChecksByName(mergedBentoChecks);
+        replaceBentoChecksPeriodInStorage(user?.id, mergedBentoChecks, year, month);
 
         if (importOps.length) {
           const results = await Promise.allSettled(
@@ -4427,12 +4750,35 @@ export default function App() {
             replaceBentoChecksPeriodInStorage(user?.id, mergedBentoChecks, year, month);
           }
           const failed = results.filter((r) => r.status === "rejected" && !isMissingRelationErr(r.reason, "bento_checks")).length;
-          if (failed > 0) {
-            showToast(`お弁当保存で${failed}件失敗しました`, "err");
-          }
+          if (failed > 0) showToast(`お弁当保存で${failed}件失敗しました`, "err");
         }
 
-        if (pricePerMeal > 0) {
+        // 施設ごとの単価をアプリ設定に反映（事業所単位で更新）
+        const priceUpdateOps = [];
+        // priceByFacility のエントリを施設名→店舗名にマッピングして更新
+        Object.entries(priceByFacility).forEach(([facilityName, price]) => {
+          if (price <= 0) return;
+          const locationName =
+            detectLocationFromFacility(facilityName, locationNames)
+            || activeLocation;
+          if (locationName) priceUpdateOps.push({ locationName, price });
+        });
+        // ファイルに単価情報があった場合のみ更新
+        if (priceUpdateOps.length > 0) {
+          setBentoPriceByLocation((prev) => {
+            const next = { ...prev };
+            priceUpdateOps.forEach(({ locationName, price }) => { next[locationName] = price; });
+            return next;
+          });
+          if (user?.id) {
+            Promise.allSettled(
+              priceUpdateOps.map(({ locationName, price }) =>
+                dbUpsertAppSettings(user.id, locationName, { bentoPricePerMeal: price })
+              )
+            ).catch(() => {});
+          }
+        } else if (pricePerMeal > 0) {
+          // 後方互換: 施設別単価がない場合は関係する全店舗に同一単価を適用
           const targetLocations = Array.from(new Set(
             targetNames.map((name) =>
               detectLocationFromFacility(resolvedLocByName[name], locationNames)
@@ -4459,8 +4805,12 @@ export default function App() {
             .map((raw) => detectLocationFromFacility(raw, locationNames))
             .filter(Boolean)
         );
+        // 施設別単価のサマリ
+        const priceNote = priceUpdateOps.length > 0
+          ? `（${priceUpdateOps.map(({ locationName, price }) => `${locationName}:¥${price}`).join("、")}）`
+          : pricePerMeal > 0 ? `（単価:¥${pricePerMeal}）` : "";
         const locLabel = detectedLocs.size ? `【${Array.from(detectedLocs).join(" / ")}】` : (facilityRaw ? `【${facilityRaw}】` : "【店舗不明】");
-        showToast(`🍱 ${sheetLabel} ${locLabel} ${targetNames.length}名・${total}食を取り込みました（${periodStart}〜${periodEnd}）`);
+        showToast(`🍱 ${sheetLabel} ${locLabel} ${targetNames.length}名・${total}食${priceNote}`);
       } catch (err) {
         showToast(`お弁当読込エラー: ${err.message}`, "err");
       }
@@ -4658,6 +5008,15 @@ export default function App() {
         setImportFailures(null);
         showToast(`${count}件を取り込みました ✓`);
       }
+
+      // ── 登録済みスタッフで出勤がなかった人を検出してダイアログ表示 ──
+      const importedNames = new Set(Object.keys(preview.byName));
+      const missingNames = registeredNames.filter(
+        (n) => !retiredSettings[n]?.isRetired && !importedNames.has(n)
+      );
+      if (missingNames.length > 0) {
+        setMissingStaffDialog({ names: missingNames, idx: 0, decisions: {} });
+      }
     } catch (e) {
       showToast(`取込エラー: ${e.message}`, "err");
     } finally { setLoading(false); }
@@ -4677,6 +5036,78 @@ export default function App() {
     try { await dbUpsertSettings(user.id, n, 0, 0, DEFAULT_EMPLOYMENT_TYPE, 0, buildEmployeeSettingOptions(n, { location: assignLoc })); }
     catch (e) { showToast(`追加エラー: ${e.message}`, "err"); }
   };
+
+  // ── シフトパターン管理 ──
+  const updateShiftRule = useCallback((key, field, value) => {
+    setShiftRulesByLocation((prev) => {
+      const current = prev[activeLocation] || cloneShiftRules(DEFAULT_TORIKOKO_SHIFT_RULES);
+      const nextRules = { ...current, [key]: { ...current[key], [field]: value } };
+      const next = { ...prev, [activeLocation]: nextRules };
+      saveShiftRulesByLocationToStorage(next);
+      return next;
+    });
+  }, [activeLocation]);
+
+  const addShiftRule = useCallback(() => {
+    const newKey = `shift_${Date.now()}`;
+    setShiftRulesByLocation((prev) => {
+      const current = prev[activeLocation] || cloneShiftRules(DEFAULT_TORIKOKO_SHIFT_RULES);
+      const nextRules = { ...current, [newKey]: { label: "新シフト", start: "09:00", end: "17:00" } };
+      const next = { ...prev, [activeLocation]: nextRules };
+      saveShiftRulesByLocationToStorage(next);
+      return next;
+    });
+  }, [activeLocation]);
+
+  const removeShiftRule = useCallback((key) => {
+    setShiftRulesByLocation((prev) => {
+      const current = prev[activeLocation] || cloneShiftRules(DEFAULT_TORIKOKO_SHIFT_RULES);
+      const nextRules = { ...current };
+      delete nextRules[key];
+      const next = { ...prev, [activeLocation]: nextRules };
+      saveShiftRulesByLocationToStorage(next);
+      return next;
+    });
+  }, [activeLocation]);
+
+  const resetShiftRules = useCallback(() => {
+    setShiftRulesByLocation((prev) => {
+      const next = { ...prev, [activeLocation]: cloneShiftRules(DEFAULT_TORIKOKO_SHIFT_RULES) };
+      saveShiftRulesByLocationToStorage(next);
+      return next;
+    });
+  }, [activeLocation]);
+
+  // ── れこるCSV: 出勤なしスタッフへの対応ハンドラ ──
+  const handleMissingStaffDecision = useCallback(async (decision) => {
+    if (!missingStaffDialog || !user) return;
+    const { names, idx, decisions } = missingStaffDialog;
+    const name = names[idx];
+    const nextDecisions = { ...decisions, [name]: decision };
+    const nextIdx = idx + 1;
+
+    if (nextIdx < names.length) {
+      // 次のスタッフへ
+      setMissingStaffDialog({ names, idx: nextIdx, decisions: nextDecisions });
+    } else {
+      // 全員分処理完了
+      setMissingStaffDialog(null);
+      for (const [n, dec] of Object.entries(nextDecisions)) {
+        if (dec === "retire") {
+          try {
+            const today = new Date();
+            const retiredAt = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`;
+            await dbSetRetired(user.id, n, true, retiredAt);
+            setRetiredSettings((p) => ({ ...p, [n]: { isRetired: true, retiredAt } }));
+            showToast(`「${n}」を退職登録しました（${retiredAt}）`);
+          } catch (e) {
+            showToast(`退職登録エラー (${n}): ${e.message}`, "err");
+          }
+        }
+        // "absent" → 何もしない（欠勤・お休みとして扱う）
+      }
+    }
+  }, [missingStaffDialog, user]);
 
   const removeName = async (name) => {
     if (!user || !window.confirm(`「${name}」のデータを全て削除しますか？`)) return;
@@ -4764,7 +5195,7 @@ export default function App() {
     // 名前リストからCSV行配列を生成するヘルパー
     const buildLinesForNames = (namesForExport) => {
       const lines = [head.map(esc).join(",")];
-      const sorted = [...namesForExport].sort((a, b) => {
+      const sorted = [...namesForExport].filter((n) => !retiredSettings[n]?.isRetired).sort((a, b) => {
         const locA = getLocationForName(a);
         const locB = getLocationForName(b);
         return locA.localeCompare(locB, "ja") || a.localeCompare(b, "ja");
@@ -4844,7 +5275,10 @@ export default function App() {
       const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = Object.assign(document.createElement("a"), { href: url, download: filename });
-      document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
     };
 
     try {
@@ -4936,6 +5370,23 @@ export default function App() {
           onUpdateFareConfig={updateFareConfig}
           onUpdateExtras={updateExtras}
           onClose={() => setSettingsModalName(null)}
+          paidLeaveSettings={paidLeaveSettings}
+          employmentSettings={employmentSettings}
+          monthlySalarySettings={monthlySalarySettings}
+          contractStartByName={contractStartByName}
+          contractEndByName={contractEndByName}
+          prevAllData={prevAllData}
+          getEffectiveRule={getEffectiveRule}
+          onUpdatePaid={staffUpdatePaid}
+          onUpdateEmployment={updateEmploymentType}
+          onUpdateMonthly={staffUpdateMonthly}
+          onUpdateContractStart={updateContractStart}
+          onUpdateContractEnd={updateContractEnd}
+          employeeOverrides={employeeOverrides}
+          workRulesByLocation={workRulesByLocation}
+          getLocationForName={getLocationForName}
+          onUpdateBreakOverride={updateBreakOverride}
+          onResetBreakOverride={resetBreakOverride}
         />
       )}
 
@@ -5021,7 +5472,7 @@ export default function App() {
                     const k = name + "|" + row.dateStr;
                     const rule = getEffectiveRuleAtLocation(name, assignedLoc);
                     const previewShiftType = guessTorikokoShiftType(assignedLoc, row);
-                    const previewShiftLabel = getShiftLabel(previewShiftType);
+                    const previewShiftLabel = getShiftLabel(previewShiftType, assignedLoc);
                     const effectiveRule = applyEntryShiftRule(rule, { ...row, shiftType: previewShiftType });
                     const snappedStart = snapStart(row.rawStart || row.roundedStart, effectiveRule);
                     const snappedEnd = resolveAutoEnd(row.rawEnd, row.roundedEnd, effectiveRule);
@@ -5061,6 +5512,54 @@ export default function App() {
       )}
 
       {/* ── CSV取込失敗モーダル ── */}
+      {/* ── れこるCSV: 出勤なしスタッフ確認ダイアログ ── */}
+      {missingStaffDialog && (() => {
+        const { names, idx } = missingStaffDialog;
+        const name = names[idx];
+        const remaining = names.length - idx;
+        return (
+          <div style={S.overlay}>
+            <div style={{ ...S.modal, maxWidth: 420, textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8, color: "#1a2e1a" }}>
+                📋 出勤データなし
+              </div>
+              {names.length > 1 && (
+                <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 6 }}>
+                  {idx + 1} / {names.length} 名
+                </div>
+              )}
+              <div style={{ fontSize: 22, fontWeight: 900, margin: "12px 0", color: "#1a2e1a" }}>
+                {name}
+              </div>
+              <div style={{ fontSize: 13, color: "#374151", marginBottom: 20, lineHeight: 1.6 }}>
+                今回取り込んだCSVに<br />
+                <b>「{name}」</b>の出勤がありません。<br />
+                退職しましたか？　お休みですか？
+              </div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+                <button
+                  style={{ ...S.btnDanger, minWidth: 140 }}
+                  onClick={() => handleMissingStaffDecision("retire")}
+                >
+                  退職登録する
+                </button>
+                <button
+                  style={{ ...S.btnP, minWidth: 140 }}
+                  onClick={() => handleMissingStaffDecision("absent")}
+                >
+                  欠勤・休みとして扱う
+                </button>
+              </div>
+              {remaining > 1 && (
+                <div style={{ marginTop: 14, fontSize: 11, color: "#9ca3af" }}>
+                  残り {remaining - 1} 名を続けて確認します
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       {importFailures && (
         <div style={S.overlay} onClick={() => setImportFailures(null)}>
           <div style={{ ...S.modal, maxWidth: 920 }} onClick={(e) => e.stopPropagation()}>
@@ -5115,7 +5614,7 @@ export default function App() {
             {loading && <span style={{ fontSize: 10, color: "#86efac", background: "rgba(255,255,255,0.1)", padding: "3px 8px", borderRadius: 999 }}>同期中…</span>}
             <div style={{ display: "flex", gap: 4, background: "rgba(0,0,0,0.25)", borderRadius: 10, padding: "3px" }}>
               <select style={S.sel} value={year} onChange={(e) => setYear(+e.target.value)}>
-                {[2025, 2026, 2027].map((y) => <option key={y} value={y}>{y}年</option>)}
+                {Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - 1 + i).map((y) => <option key={y} value={y}>{y}年</option>)}
               </select>
               <select style={{ ...S.sel, minWidth: 148 }} value={month} onChange={(e) => setMonth(+e.target.value)}>
                 {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => {
@@ -5243,6 +5742,61 @@ export default function App() {
               </label>
             </div>
             <WorkRulePanel workRule={activeWorkRule} onUpdate={updateWorkRule} />
+
+            {/* ── シフトパターン設定 ── */}
+            <div style={{ marginTop: 24, borderTop: "1px solid #e5e7eb", paddingTop: 18 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <span style={{ fontSize: 14, fontWeight: 900, color: "#1a2e1a" }}>🕐 シフトパターン設定</span>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button style={{ ...S.addBtn, fontSize: 11, padding: "5px 12px" }} onClick={addShiftRule}>＋ 追加</button>
+                  <button style={{ ...S.btnG, fontSize: 10, padding: "5px 10px", color: "#6b7280" }} onClick={resetShiftRules}>リセット</button>
+                </div>
+              </div>
+              <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 10 }}>
+                れこるCSV取込時に自動判定するシフトパターンです。ラベル・開始・終了を自由に設定できます。
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {Object.entries(shiftRules).map(([key, rule]) => (
+                  <div key={key} style={{ display: "flex", alignItems: "center", gap: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 10, padding: "10px 12px", flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+                      <span style={{ fontSize: 10, color: "#9ca3af", whiteSpace: "nowrap" }}>ラベル</span>
+                      <input
+                        value={rule.label}
+                        onChange={(e) => updateShiftRule(key, "label", e.target.value)}
+                        style={{ border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", fontSize: 13, fontWeight: 800, width: 72, color: "#1a2e1a" }}
+                      />
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ fontSize: 10, color: "#9ca3af" }}>開始</span>
+                      <input
+                        type="time"
+                        value={rule.start}
+                        onChange={(e) => updateShiftRule(key, "start", e.target.value)}
+                        style={{ border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", fontSize: 13, width: 100 }}
+                      />
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ fontSize: 10, color: "#9ca3af" }}>終了</span>
+                      <input
+                        type="time"
+                        value={rule.end}
+                        onChange={(e) => updateShiftRule(key, "end", e.target.value)}
+                        style={{ border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", fontSize: 13, width: 100 }}
+                      />
+                    </div>
+                    <span style={{ fontSize: 11, color: "#6b7280", marginLeft: 4 }}>
+                      {rule.start}〜{rule.end}（{Math.round((t2m(rule.end) - t2m(rule.start)) / 6) / 10}h）
+                    </span>
+                    <button
+                      onClick={() => removeShiftRule(key)}
+                      disabled={Object.keys(shiftRules).length <= 1}
+                      style={{ marginLeft: "auto", background: "none", border: "1px solid #fecaca", color: "#ef4444", borderRadius: 6, padding: "3px 8px", fontSize: 11, cursor: "pointer", opacity: Object.keys(shiftRules).length <= 1 ? 0.3 : 1 }}>
+                      削除
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -5556,6 +6110,7 @@ const S = {
   noteBox: { background: "#fffbe6", border: "1px solid #fde68a", color: "#6b5e4c", borderRadius: 10, padding: "10px 14px", fontSize: 12, marginBottom: 10, lineHeight: 1.8 },
   btnG: { border: "1px solid #ddd5c8", background: "#fff", borderRadius: 10, padding: "9px 14px", fontSize: 12, cursor: "pointer", fontWeight: 800 },
   btnP: { border: "1px solid #1a2e1a", background: "#1a2e1a", color: "#e8f5e8", borderRadius: 10, padding: "9px 14px", fontSize: 12, cursor: "pointer", fontWeight: 900 },
+  btnDanger: { border: "1px solid #991b1b", background: "#991b1b", color: "#fff", borderRadius: 10, padding: "9px 14px", fontSize: 12, cursor: "pointer", fontWeight: 900 },
   inp: { width: "100%", border: "1px solid #ddd5c8", borderRadius: 10, padding: "10px 12px", fontSize: 14, outline: "none", boxSizing: "border-box" },
   numInput: { background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", borderRadius: 6, padding: "4px 8px", color: "#e8f5e8", fontSize: 13, fontWeight: 700, outline: "none", textAlign: "right" },
   sectionLabel: { fontSize: 11, fontWeight: 800, color: "#374151", marginBottom: 8, paddingBottom: 4, borderBottom: "1px solid #e5e7eb" },
