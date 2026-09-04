@@ -58,7 +58,7 @@
 // ════════════════════════════════════════════════════════════════════════
 
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { supabase } from "./supabase";
+import { supabase, SUPABASE_URL } from "./supabase";
 import * as XLSX from "xlsx";
 
 // ─── 定数 ─────────────────────────────────────────────────────────────────────
@@ -1523,6 +1523,23 @@ function formatImportError(error) {
   return parts.join(" / ") || "不明なエラー";
 }
 
+function isFetchNetworkError(error) {
+  const t = `${error?.name || ""} ${getErrText(error)}`.toLowerCase();
+  return (
+    t.includes("failed to fetch") ||
+    t.includes("networkerror") ||
+    t.includes("load failed") ||
+    (t.includes("typeerror") && t.includes("fetch"))
+  );
+}
+
+function formatAppError(error) {
+  if (isFetchNetworkError(error)) {
+    return `Supabaseに接続できません。接続先（${SUPABASE_URL}）が見つからない、Supabaseプロジェクトが停止/削除されている、またはネットワーク/DNSの問題です。`;
+  }
+  return formatImportError(error);
+}
+
 function isMissingColumnErr(error, column) {
   const t = getErrText(error);
   return (
@@ -1635,7 +1652,7 @@ async function dbLoadWorkRules(userId) {
     return {
       rulesByLocation: defaultRulesMap(),
       ruleModesByLocation: {},
-      warning: `DBエラー[${error.code}]: ${error.message}`
+      warning: `DBエラー[${error.code}]: ${formatAppError(error)}`
     };
   }
 
@@ -3500,7 +3517,7 @@ function Login({ onLoggedIn }) {
       if (error) throw error;
       onLoggedIn(data.user);
     } catch (e) {
-      alert(e.message);
+      alert(formatAppError(e));
     } finally {
       setBusy(false);
     }
@@ -3886,7 +3903,7 @@ export default function App() {
         buildEmployeeSettingOptions(name, { overrideRule: nextOverride })
       );
     } catch (e) {
-      showToast(`保存エラー: ${e.message}`, "err");
+      showToast(`保存エラー: ${formatAppError(e)}`, "err");
     }
   }, [user, getLocationForName, workRulesByLocation, employeeOverrides, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
   const resetEmployeeOverrideRule = useCallback(async (name) => {
@@ -3907,7 +3924,7 @@ export default function App() {
         buildEmployeeSettingOptions(name, { overrideRule: null })
       );
     } catch (e) {
-      showToast(`保存エラー: ${e.message}`, "err");
+      showToast(`保存エラー: ${formatAppError(e)}`, "err");
     }
   }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
 
@@ -3931,7 +3948,7 @@ export default function App() {
         monthlySalarySettings[name] ?? 0,
         buildEmployeeSettingOptions(name, { overrideRule: nextOverride })
       );
-    } catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
+    } catch (e) { showToast(`保存エラー: ${formatAppError(e)}`, "err"); }
   }, [user, employeeOverrides, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
 
   const resetBreakOverride = useCallback(async (name) => {
@@ -3959,7 +3976,7 @@ export default function App() {
         monthlySalarySettings[name] ?? 0,
         buildEmployeeSettingOptions(name, { overrideRule: nextOverrideForSave })
       );
-    } catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
+    } catch (e) { showToast(`保存エラー: ${formatAppError(e)}`, "err"); }
   }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
 
   const confirmSettingSave = useCallback((message) => window.confirm(`${message}\n保存しますか？`), []);
@@ -3997,7 +4014,7 @@ export default function App() {
       );
       showToast(`${name} の丸め設定を保存しました ✓`);
     } catch (e) {
-      showToast(`保存エラー: ${e.message}`, "err");
+      showToast(`保存エラー: ${formatAppError(e)}`, "err");
     }
   }, [user, contractStartByName, contractEndByName, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
   const updateContractStart = useCallback(async (name, value) => {
@@ -4243,7 +4260,7 @@ export default function App() {
         setActiveLocation((prev) => rulesResult.rulesByLocation[prev] ? prev : firstLoc);
         if (rulesResult.warning) showToast(rulesResult.warning, "err");
         if (bentoResult.error && !isMissingRelationErr(bentoResult.error, "bento_checks")) {
-          showToast(`お弁当保存読込エラー: ${bentoResult.error.message}`, "err");
+          showToast(`お弁当保存読込エラー: ${formatAppError(bentoResult.error)}`, "err");
         }
         const firstActiveName = [
           ...Object.keys(mergedAttendance || {}),
@@ -4253,7 +4270,7 @@ export default function App() {
         setActiveName((prev) => (prev && !st.retired?.[prev]?.isRetired) ? prev : firstActiveName);
         attendanceShiftLoadedRef.current = true;
       } catch (e) {
-        if (alive) showToast(`読込エラー: ${e.message}`, "err");
+        if (alive) showToast(`読込エラー: ${formatAppError(e)}`, "err");
       } finally {
         if (alive) setLoading(false);
       }
@@ -4312,7 +4329,7 @@ export default function App() {
 
     const next = sanitizeRule({ ...current, ...converted, locationName: activeLocation });
     setWorkRulesByLocation((prev) => ({ ...prev, [activeLocation]: next }));
-    try { await dbUpsertWorkRule(user.id, { ...next, ruleMode: activeRuleMode }); } catch (e) { showToast(`ルール保存エラー: ${e.message}`, "err"); }
+    try { await dbUpsertWorkRule(user.id, { ...next, ruleMode: activeRuleMode }); } catch (e) { showToast(`ルール保存エラー: ${formatAppError(e)}`, "err"); }
   }, [user, activeLocation, workRulesByLocation, activeRuleMode]);
 
   const updateRuleMode = useCallback(async (locationName, mode) => {
@@ -4323,7 +4340,7 @@ export default function App() {
       const rule = sanitizeRule(workRulesByLocation[locationName] || { ...DEFAULT_WORK_RULE, locationName });
       await dbUpsertWorkRule(user.id, { ...rule, locationName, ruleMode: normalizedMode });
     } catch (e) {
-      showToast(`設定保存エラー: ${e.message}`, "err");
+      showToast(`設定保存エラー: ${formatAppError(e)}`, "err");
     }
   }, [user, workRulesByLocation]);
 
@@ -4343,7 +4360,7 @@ export default function App() {
       return nextMap;
     });
     setActiveLocation(loc);
-    try { await dbUpsertWorkRule(user.id, next); } catch (e) { showToast(`店舗追加エラー: ${e.message}`, "err"); }
+    try { await dbUpsertWorkRule(user.id, next); } catch (e) { showToast(`店舗追加エラー: ${formatAppError(e)}`, "err"); }
   }, [user, workRulesByLocation, activeWorkRule, shiftRules]);
 
   const removeLocation = useCallback(async () => {
@@ -4387,7 +4404,7 @@ export default function App() {
       await dbDeleteWorkRule(user.id, activeLocation);
       const failed = locationResults.filter((r) => r.status === "rejected").length;
       if (failed > 0) showToast(`所属店舗の再保存で${failed}件失敗しました`, "err");
-    } catch (e) { showToast(`削除エラー: ${e.message}`, "err"); }
+    } catch (e) { showToast(`削除エラー: ${formatAppError(e)}`, "err"); }
   }, [user, workRulesByLocation, locationNames, activeLocation, allData, registeredNames, employeeLocation, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
 
   // ── 勤怠データ更新 ──
@@ -4428,7 +4445,7 @@ export default function App() {
         await dbUpsertAttendance(user.id, name, dateStr, entryOrVal);
       }
     } catch (e) {
-      showToast(`保存エラー: ${e.message}`, "err");
+      showToast(`保存エラー: ${formatAppError(e)}`, "err");
     }
   }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions, getLocationForName, activeLocation]);
 
@@ -4438,7 +4455,7 @@ export default function App() {
     if (!confirmSettingSave(`${name} の雇用区分を「${normalized}」で保存します。`)) return;
     setEmploymentSettings((prev) => ({ ...prev, [name]: normalized }));
     try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0, normalized, monthlySalarySettings[name] ?? 0, buildEmployeeSettingOptions(name)); }
-    catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
+    catch (e) { showToast(`保存エラー: ${formatAppError(e)}`, "err"); }
   }, [user, fareSettings, paidLeaveSettings, monthlySalarySettings, confirmSettingSave, buildEmployeeSettingOptions]);
 
   // ── スタッフ管理用コールバック ──
@@ -4467,7 +4484,7 @@ export default function App() {
       );
       if (options.notice !== false) showToast(`${name} → ${normalizedLoc} に変更しました ✓`);
     } catch (e) {
-      showToast(e.message, "err");
+      showToast(formatAppError(e), "err");
     }
   }, [user, fareSettings, paidLeaveSettings, employmentSettings, monthlySalarySettings, confirmSettingSave, buildEmployeeSettingOptions]);
   const staffUpdateLocation = useCallback(async (name, loc) => {
@@ -4580,7 +4597,7 @@ export default function App() {
         showToast(`保存しました ✓ ${stamp}`);
       }
     } catch (e) {
-      showToast(`保存エラー: ${e.message}`, "err");
+      showToast(`保存エラー: ${formatAppError(e)}`, "err");
     } finally {
       setSaveBusy(false);
     }
@@ -4600,7 +4617,7 @@ export default function App() {
       setRetiredSettings((p) => ({ ...p, [name]: { isRetired: true, retiredAt: today } }));
       setActiveName((prev) => prev === name ? "" : prev);
       showToast(`「${name}」を退職登録しました`);
-    } catch (e) { showToast(e.message, "err"); }
+    } catch (e) { showToast(formatAppError(e), "err"); }
   };
 
   const reinstateStaff = async (name) => {
@@ -4609,25 +4626,25 @@ export default function App() {
       await dbSetRetired(user.id, name, false, "");
       setRetiredSettings((p) => ({ ...p, [name]: { isRetired: false, retiredAt: "" } }));
       showToast(`「${name}」を復職しました`);
-    } catch (e) { showToast(e.message, "err"); }
+    } catch (e) { showToast(formatAppError(e), "err"); }
   };
   const staffUpdateFare = useCallback(async (name, val) => {
     if (!user) return;
     setFareSettings((p) => ({ ...p, [name]: val }));
     try { await dbUpsertSettings(user.id, name, val, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0, buildEmployeeSettingOptions(name)); }
-    catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
+    catch (e) { showToast(`保存エラー: ${formatAppError(e)}`, "err"); }
   }, [user, paidLeaveSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
   const staffUpdatePaid = useCallback(async (name, val) => {
     if (!user) return;
     setPaidLeaveSettings((p) => ({ ...p, [name]: val }));
     try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, val, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, monthlySalarySettings[name] ?? 0, buildEmployeeSettingOptions(name)); }
-    catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
+    catch (e) { showToast(`保存エラー: ${formatAppError(e)}`, "err"); }
   }, [user, fareSettings, employmentSettings, monthlySalarySettings, buildEmployeeSettingOptions]);
   const staffUpdateMonthly = useCallback(async (name, val) => {
     if (!user) return;
     setMonthlySalarySettings((p) => ({ ...p, [name]: val }));
     try { await dbUpsertSettings(user.id, name, fareSettings[name] ?? 0, paidLeaveSettings[name] ?? 0, employmentSettings[name] ?? DEFAULT_EMPLOYMENT_TYPE, val, buildEmployeeSettingOptions(name)); }
-    catch (e) { showToast(`保存エラー: ${e.message}`, "err"); }
+    catch (e) { showToast(`保存エラー: ${formatAppError(e)}`, "err"); }
   }, [user, fareSettings, paidLeaveSettings, employmentSettings, buildEmployeeSettingOptions]);
   const onFile = (e) => {
     const file = e.target.files[0]; if (!file) return;
@@ -4812,7 +4829,7 @@ export default function App() {
         const locLabel = detectedLocs.size ? `【${Array.from(detectedLocs).join(" / ")}】` : (facilityRaw ? `【${facilityRaw}】` : "【店舗不明】");
         showToast(`🍱 ${sheetLabel} ${locLabel} ${targetNames.length}名・${total}食${priceNote}`);
       } catch (err) {
-        showToast(`お弁当読込エラー: ${err.message}`, "err");
+        showToast(`お弁当読込エラー: ${formatAppError(err)}`, "err");
       }
     };
     reader.readAsArrayBuffer(file);
@@ -4869,7 +4886,7 @@ export default function App() {
         setBentoStorageOnly(true);
         replaceBentoChecksPeriodInStorage(user?.id, nextBentoChecks, year, month);
       } else {
-        showToast(`お弁当保存エラー: ${e.message}`, "err");
+        showToast(`お弁当保存エラー: ${formatAppError(e)}`, "err");
       }
     }
   }, [bentoChecksByName, getBentoPriceForName, user, year, month]);
@@ -4994,7 +5011,7 @@ export default function App() {
           name: op.name,
           dateStr: op.dateStr || "",
           location: op.location || "",
-          reason: formatImportError(result.reason),
+          reason: formatAppError(result.reason),
         }));
       const failed = failureItems.length;
       if (failed > 0) {
@@ -5018,7 +5035,7 @@ export default function App() {
         setMissingStaffDialog({ names: missingNames, idx: 0, decisions: {} });
       }
     } catch (e) {
-      showToast(`取込エラー: ${e.message}`, "err");
+      showToast(`取込エラー: ${formatAppError(e)}`, "err");
     } finally { setLoading(false); }
   };
 
@@ -5034,7 +5051,7 @@ export default function App() {
     setRegisteredNames((p) => (p.includes(n) ? p : [...p, n].sort((a, b) => a.localeCompare(b, "ja"))));
     setActiveName(n);
     try { await dbUpsertSettings(user.id, n, 0, 0, DEFAULT_EMPLOYMENT_TYPE, 0, buildEmployeeSettingOptions(n, { location: assignLoc })); }
-    catch (e) { showToast(`追加エラー: ${e.message}`, "err"); }
+    catch (e) { showToast(`追加エラー: ${formatAppError(e)}`, "err"); }
   };
 
   // ── シフトパターン管理 ──
@@ -5101,7 +5118,7 @@ export default function App() {
             setRetiredSettings((p) => ({ ...p, [n]: { isRetired: true, retiredAt } }));
             showToast(`「${n}」を退職登録しました（${retiredAt}）`);
           } catch (e) {
-            showToast(`退職登録エラー (${n}): ${e.message}`, "err");
+            showToast(`退職登録エラー (${n}): ${formatAppError(e)}`, "err");
           }
         }
         // "absent" → 何もしない（欠勤・お休みとして扱う）
@@ -5136,7 +5153,7 @@ export default function App() {
       setActiveName((prev) => prev === name ? (names.find((x) => x !== name) || "") : prev);
       showToast(`「${name}」を削除しました`);
     } catch (e) {
-      showToast(`削除エラー: ${e.message}`, "err");
+      showToast(`削除エラー: ${formatAppError(e)}`, "err");
     } finally { setLoading(false); }
   };
 
@@ -5307,7 +5324,7 @@ export default function App() {
         showToast(`CSV出力しました（${target.names.length}名）`);
       }
     } catch (e) {
-      showToast(`CSV出力エラー: ${e.message}`, "err");
+      showToast(`CSV出力エラー: ${formatAppError(e)}`, "err");
     } finally {
       setLoading(false);
     }
