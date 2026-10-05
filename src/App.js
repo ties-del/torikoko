@@ -824,7 +824,8 @@ function calcFareTotal(name, workDays, year, month, fareConfig, fareSettings) {
 
 function calcExtrasTotal(name, year, month, extras) {
   const periodKey = `${year}-${pad2(month)}`;
-  return (extras?.[name] || [])
+  const list = extras?.[name];
+  return (Array.isArray(list) ? list : [])
     .filter(e => e.periodKey === periodKey)
     .reduce((sum, e) => sum + (e.amount ?? 0), 0);
 }
@@ -1636,7 +1637,10 @@ async function dbLoadSettings(userId) {
       } catch {}
     }
     if (r.extras_json) {
-      try { extras[r.name] = JSON.parse(r.extras_json); } catch {}
+      try {
+        const parsed = JSON.parse(r.extras_json);
+        extras[r.name] = Array.isArray(parsed) ? parsed : [];
+      } catch {}
     }
     registeredNames.push(r.name);
   }
@@ -2372,7 +2376,7 @@ function AttendanceTable({ name, year, month, entries, prevEntries, fare, onUpda
             {extrasTotal > 0 && (
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <span style={{ fontSize: 10, color: "#fbbf24", fontWeight: 700, minWidth: 110 }}>💴 臨時支給</span>
-                {(extras?.[name] || []).filter(e => e.periodKey === `${year}-${pad2(month)}`).map(e => (
+                {(Array.isArray(extras?.[name]) ? extras[name] : []).filter(e => e.periodKey === `${year}-${pad2(month)}`).map(e => (
                   <span key={e.id} style={{ fontSize: 11, color: "#fde68a", background: "rgba(251,191,36,0.15)", borderRadius: 4, padding: "1px 8px" }}>
                     {e.label} ¥{e.amount.toLocaleString()}
                   </span>
@@ -2886,7 +2890,7 @@ function IndividualSettingsModal({ name, year, month, fareSettings, fareConfig, 
   const currentBreakThres = hasBreakOverride ? (breakRule[breakThresKey] ?? baseLocRule[breakThresKey]) : baseLocRule[breakThresKey];
 
   const config     = fareConfig[name] || { type: "daily" };
-  const nameExtras = extras[name] || [];
+  const nameExtras = Array.isArray(extras[name]) ? extras[name] : [];
 
   const handleTypeChange = (type) =>
     onUpdateFareConfig(name, { ...config, type });
@@ -4047,7 +4051,16 @@ export default function App() {
       const savedBentoPriceMap = loadBentoPriceMapFromStorage(user.id);
       if (Object.keys(savedBentoPriceMap).length > 0) setBentoPriceByLocation(savedBentoPriceMap);
       const savedExtras = localStorage.getItem(`torikoko:extras:${user.id}`);
-      if (savedExtras) setExtras(JSON.parse(savedExtras));
+      if (savedExtras) {
+        const parsedExtras = JSON.parse(savedExtras);
+        if (parsedExtras && typeof parsedExtras === "object") {
+          const safeExtras = {};
+          for (const [k, v] of Object.entries(parsedExtras)) {
+            safeExtras[k] = Array.isArray(v) ? v : [];
+          }
+          setExtras(safeExtras);
+        }
+      }
       extrasLoadedRef.current = true;
     } catch { /* ignore */ }
   }, [user]);
